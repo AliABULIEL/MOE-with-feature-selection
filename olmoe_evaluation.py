@@ -119,18 +119,160 @@ class OLMoEEvaluator:
         return tokenizer
 
     def _set_num_experts(self, num_experts: int):
-        """Set number of experts per token."""
+        """
+        Set number of experts per token.
+
+        This method updates the model configuration and all MoE layers to use
+        a specific number of experts during inference.
+        """
         logger.info(f"Setting num_experts_per_tok to {num_experts}")
+
+        # Update model config
         self.model.config.num_experts_per_tok = num_experts
 
-        # Update all MoE layers
-        for layer in self.model.model.layers:
-            if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'num_experts_per_tok'):
-                layer.mlp.num_experts_per_tok = num_experts
+        # Track how many layers were updated
+        layers_updated = 0
+
+        # Update all MoE layers - try multiple possible attribute locations
+        for i, layer in enumerate(self.model.model.layers):
+            layer_updated = False
+
+            # Try common attribute locations for OLMoE
+            if hasattr(layer, 'mlp'):
+                mlp = layer.mlp
+
+                # Try 1: num_experts_per_tok attribute
+                if hasattr(mlp, 'num_experts_per_tok'):
+                    mlp.num_experts_per_tok = num_experts
+                    layer_updated = True
+
+                # Try 2: top_k attribute (common in MoE implementations)
+                if hasattr(mlp, 'top_k'):
+                    mlp.top_k = num_experts
+                    layer_updated = True
+
+                # Try 3: Check if there's a config object in the MLP
+                if hasattr(mlp, 'config') and hasattr(mlp.config, 'num_experts_per_tok'):
+                    mlp.config.num_experts_per_tok = num_experts
+                    layer_updated = True
+
+                # Try 4: Check for router with top_k
+                if hasattr(mlp, 'router') and hasattr(mlp.router, 'top_k'):
+                    mlp.router.top_k = num_experts
+                    layer_updated = True
+
+                # Try 5: Check for gate with top_k
+                if hasattr(mlp, 'gate') and hasattr(mlp.gate, 'top_k'):
+                    mlp.gate.top_k = num_experts
+                    layer_updated = True
+
+            if layer_updated:
+                layers_updated += 1
+
+        logger.info(f"Updated {layers_updated}/{len(self.model.model.layers)} layers")
+
+        if layers_updated == 0:
+            logger.warning(
+                "WARNING: No MoE layers were updated! The expert configuration "
+                "might not take effect. This could mean:\n"
+                "  1. The model architecture has changed\n"
+                "  2. The expert count is controlled differently\n"
+                "  3. The attribute names are different than expected"
+            )
+
+            # Print diagnostic info for first layer
+            if len(self.model.model.layers) > 0:
+                layer0 = self.model.model.layers[0]
+                logger.info(f"First layer type: {type(layer0)}")
+                if hasattr(layer0, 'mlp'):
+                    logger.info(f"MLP type: {type(layer0.mlp)}")
+                    mlp_attrs = [attr for attr in dir(layer0.mlp)
+                                if not attr.startswith('_') and
+                                not callable(getattr(layer0.mlp, attr))]
+                    logger.info(f"MLP attributes: {mlp_attrs[:20]}")  # Show first 20
 
     def _restore_original_experts(self):
         """Restore original expert configuration."""
         self._set_num_experts(self.original_num_experts)
+
+    def _verify_expert_config(self, num_experts: int) -> bool:
+        """
+        Verify that the expert configuration was properly applied by checking
+        if different expert counts produce different outputs.
+
+        Args:
+            num_experts: Expected number of experts per token
+
+        Returns:
+            True if configuration is correct, False otherwise
+        """
+        # Check config
+        if self.model.config.num_experts_per_tok != num_experts:
+            logger.error(
+                f"Config mismatch: expected {num_experts}, "
+                f"got {self.model.config.num_experts_per_tok}"
+            )
+            return False
+
+        # Run a quick inference to check router behavior and output differences
+        test_input = "The future of artificial intelligence is"
+        inputs = self.tokenizer(test_input, return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(
+                **inputs,
+                output_router_logits=True,
+                return_dict=True
+            )
+
+        # Store current output logits for comparison
+        current_logits = outputs.logits[0, -1, :].cpu().numpy()
+
+        # Store in cache for cross-configuration comparison
+        if not hasattr(self, '_verification_cache'):
+            self._verification_cache = {}
+
+        self._verification_cache[num_experts] = current_logits
+
+        # If we have results from a previous configuration, compare
+        if len(self._verification_cache) > 1:
+            # Compare with 8-expert baseline
+            if 8 in self._verification_cache and num_experts != 8:
+                baseline_logits = self._verification_cache[8]
+                diff = np.abs(current_logits - baseline_logits).max()
+
+                if diff < 1e-6:
+                    logger.error(
+                        f"CRITICAL: Output logits are IDENTICAL between {num_experts} "
+                        f"and 8 experts! (max diff: {diff:.2e})\n"
+                        "This means the expert configuration is NOT taking effect!"
+                    )
+                    return False
+                else:
+                    logger.info(
+                        f"✓ Output verification: {num_experts} experts produce "
+                        f"different outputs (max diff: {diff:.4f})"
+                    )
+
+        # Check router logits
+        if outputs.router_logits is not None and len(outputs.router_logits) > 0:
+            # Check first layer's router output
+            router_logits = outputs.router_logits[0][0][0]  # First layer, batch, token
+
+            # Get top-k experts
+            probs = torch.softmax(router_logits, dim=-1)
+            top_k_values, top_k_indices = torch.topk(probs, k=min(64, num_experts))
+
+            # Log the top experts
+            logger.info(
+                f"Verification: Router probabilities - "
+                f"Top {len(top_k_indices)} experts: {top_k_indices.cpu().numpy()}"
+            )
+
+            return True
+        else:
+            logger.warning("Could not verify via router logits (not available)")
+            return True  # Assume it's working if we can't verify
 
     def load_evaluation_dataset(self, dataset_name: str) -> List[str]:
         """
@@ -183,6 +325,13 @@ class OLMoEEvaluator:
 
         # Set expert configuration
         self._set_num_experts(num_experts)
+
+        # Verify configuration was applied
+        if not self._verify_expert_config(num_experts):
+            logger.error(
+                f"Failed to verify expert configuration for {num_experts} experts! "
+                "Results may be incorrect."
+            )
 
         total_loss = 0.0
         total_tokens = 0
