@@ -4,16 +4,45 @@ This repository contains a comprehensive guide for running OLMoE (Open Mixture-o
 
 ## Quick Start
 
+### 📚 Choose Your Notebook
+
+**NEW! 🔬 For Hands-On Learning with Real Data:**
+- **`OLMoE_Hands_On_Demo.ipynb`** - See ACTUAL data flow, router decisions, and results!
+  - Shows real token IDs, embeddings, router probabilities
+  - Runs side-by-side comparisons with real outputs
+  - Visualizes expert activation patterns
+  - 3 test cases with verifiable results
+  - **Perfect for understanding HOW it works with real numbers**
+
+**📖 For Comprehensive Learning:**
+- **`OLMoE_Inference_More_Experts.ipynb`** - Complete tutorial and theory
+  - Deep architectural explanations
+  - Adaptive expert selection algorithms
+  - Advanced visualization techniques
+  - Production-ready code templates
+
+**📄 For Understanding the Data:**
+- **`DATA_FLOW_EXPLAINED.md`** - Step-by-step explanation with example data
+  - Shows exact tensors and shapes at each step
+  - Real router probabilities and expert selections
+  - Explains why more experts change outputs
+
 ### Open in Google Colab
 
-1. Upload `OLMoE_Inference_More_Experts.ipynb` to Google Colab
+1. Upload either notebook to Google Colab
 2. Set runtime to GPU: **Runtime → Change runtime type → GPU (T4 or better)**
 3. Run all cells sequentially
 
 ### What's Inside
 
-The notebook covers:
+**OLMoE_Hands_On_Demo.ipynb** shows:
+- ✅ Real token IDs and router decisions with actual numbers
+- ✅ Side-by-side output comparison (8 vs 16 vs 32 vs 64 experts)
+- ✅ Expert activation heatmaps showing which experts fire
+- ✅ Performance metrics with real timing data
+- ✅ Customizable test prompts
 
+**OLMoE_Inference_More_Experts.ipynb** covers:
 - **Understanding OLMoE Architecture**: Deep dive into the MoE mechanism
 - **Default Inference (8 experts)**: Baseline performance
 - **Modified Inference (16, 32, 64 experts)**: Using more experts for better quality
