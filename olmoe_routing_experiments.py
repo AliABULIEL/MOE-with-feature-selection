@@ -476,7 +476,8 @@ class RoutingExperimentRunner:
             'regular': RegularRouting,
             'normalized': NormalizedRouting,
             'uniform': UniformRouting,
-            'adaptive': AdaptiveRouting
+            'adaptive': AdaptiveRouting,
+            'baseline': RegularRouting  # Alias for regular routing (used in two-phase experiments)
         }
 
     def _set_expert_count(self, num_experts: int):
@@ -569,7 +570,8 @@ class RoutingExperimentRunner:
         config: RoutingConfig,
         texts: List[str],
         dataset_name: str,
-        max_length: int = 512
+        max_length: int = 512,
+        save_internal_logs: bool = True
     ) -> ExperimentResults:
         """
         Evaluate a single routing configuration.
@@ -579,6 +581,7 @@ class RoutingExperimentRunner:
             texts: List of text samples
             dataset_name: Name of dataset being evaluated
             max_length: Maximum sequence length
+            save_internal_logs: Whether to save detailed router_logits logs
 
         Returns:
             ExperimentResults with all metrics
@@ -597,6 +600,15 @@ class RoutingExperimentRunner:
         correct_predictions = 0
         num_samples = 0
         num_errors = 0
+
+        # Internal routing logs storage
+        internal_routing_logs = {
+            'config': config.get_name(),
+            'strategy': config.strategy,
+            'num_experts': config.num_experts,
+            'dataset': dataset_name,
+            'samples': []
+        }
 
         start_time = time.time()
 
@@ -635,11 +647,35 @@ class RoutingExperimentRunner:
                     targets = input_ids[:, 1:]
                     correct_predictions += (predictions == targets).sum().item()
 
-                    # Apply routing strategy to router logits
+                    # Apply routing strategy to router logits and save internal logs
                     if outputs.router_logits is not None:
-                        for router_logit in outputs.router_logits:
+                        sample_routing_data = {
+                            'sample_id': num_samples,
+                            'num_tokens': input_ids.shape[1],
+                            'loss': loss,
+                            'layers': []
+                        }
+
+                        for layer_idx, router_logit in enumerate(outputs.router_logits):
                             if router_logit is not None:
-                                strategy.route(router_logit)
+                                # Apply routing strategy
+                                expert_indices, expert_weights = strategy.route(router_logit)
+
+                                # Save internal routing data if requested
+                                if save_internal_logs:
+                                    # Convert to numpy for storage (sample first few tokens)
+                                    max_tokens_to_log = min(10, router_logit.shape[1])  # Log first 10 tokens
+                                    layer_data = {
+                                        'layer': layer_idx,
+                                        'router_logits_shape': list(router_logit.shape),
+                                        'selected_experts': expert_indices[:, :max_tokens_to_log, :].cpu().to(torch.int64).numpy().tolist(),
+                                        'expert_weights': expert_weights[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist(),
+                                        'router_logits_sample': router_logit[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist()
+                                    }
+                                    sample_routing_data['layers'].append(layer_data)
+
+                        if save_internal_logs:
+                            internal_routing_logs['samples'].append(sample_routing_data)
 
                     num_samples += 1
 
@@ -684,10 +720,30 @@ class RoutingExperimentRunner:
             unique_experts_activated=routing_stats['unique_experts']
         )
 
-        # Save individual log file
+        # Save individual log file (summary)
         log_file = self.logs_dir / f"{config.get_name()}_{dataset_name}.json"
         with open(log_file, 'w') as f:
             json.dump(results.to_dict(), f, indent=2)
+
+        # Save detailed internal routing logs to unique file
+        if save_internal_logs and internal_routing_logs['samples']:
+            internal_log_file = self.logs_dir / f"{config.get_name()}_{dataset_name}_internal_routing.json"
+
+            # Add summary statistics to internal logs
+            internal_routing_logs['summary'] = {
+                'total_samples': num_samples,
+                'total_tokens': total_tokens,
+                'perplexity': float(perplexity),
+                'token_accuracy': float(token_accuracy),
+                'avg_entropy': float(routing_stats['avg_entropy']),
+                'unique_experts_activated': routing_stats['unique_experts'],
+                'expert_utilization': routing_stats['unique_experts'] / 64
+            }
+
+            with open(internal_log_file, 'w') as f:
+                json.dump(internal_routing_logs, f, indent=2)
+
+            logger.info(f"Saved internal routing logs to: {internal_log_file}")
 
         logger.info(
             f"Results: PPL={perplexity:.2f}, Acc={token_accuracy:.4f}, "
