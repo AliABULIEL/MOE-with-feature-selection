@@ -1,5 +1,46 @@
 # OLMoE Inference with More Experts
 
+---
+
+## 🚀 **NEW: Production Routing Experiments Framework**
+
+### Want to systematically test how different routing strategies affect inference quality?
+
+We have a **complete production-ready framework** ready to be set up:
+
+**📖 [START HERE: SETUP_INSTRUCTIONS.md](SETUP_INSTRUCTIONS.md)** - 3 easy setup options
+
+**📚 [Claude Code Prompts: CLAUDE_CODE_PROMPTS.md](CLAUDE_CODE_PROMPTS.md)** - Detailed prompts for creating all files
+
+### Quick Setup (20-30 minutes):
+```bash
+# Option 1: Use Claude Code with prompts from CLAUDE_CODE_PROMPTS.md
+# Option 2: Use the combined prompt in SETUP_INSTRUCTIONS.md
+# Option 3: Manual creation (for experts)
+```
+
+### What You'll Get:
+- ✅ 4 routing strategies (Regular, Normalized, Uniform, Adaptive)
+- ✅ Comprehensive evaluation on WikiText, LAMBADA, PIQA
+- ✅ Individual log files for each experiment
+- ✅ Automated visualizations (12+ plots)
+- ✅ Detailed analysis reports
+- ✅ Production-ready Python code
+- ✅ Complete documentation
+
+### After Setup:
+```bash
+python run_experiments.py --quick        # 5-minute test
+python run_experiments.py               # Full experiments  
+python analyze_results.py --find-optimal # Find best config
+```
+
+**See [SETUP_INSTRUCTIONS.md](SETUP_INSTRUCTIONS.md) for complete details!**
+
+---
+
+## 📚 Original: Expert Inference Notebooks
+
 This repository contains a comprehensive guide for running OLMoE (Open Mixture-of-Experts Language Model) inference with **more experts than the default configuration**.
 
 ## Quick Start
@@ -199,6 +240,6 @@ This project uses the OLMoE model which is released under the Apache 2.0 license
 ---
 
 **Created by**: Senior AI Researcher & Software Engineer
-**Last Updated**: 2025-11-15
+**Last Updated**: 2025-11-21
 
 🚀 **Happy experimenting with OLMoE!**
