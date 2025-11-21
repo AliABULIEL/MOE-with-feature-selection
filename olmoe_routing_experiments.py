@@ -125,8 +125,9 @@ class RoutingStrategy:
             expert_weights: Corresponding expert weights
         """
         # Convert to numpy and flatten
-        indices_np = expert_indices.detach().cpu().numpy().flatten()
-        weights_np = expert_weights.detach().cpu().numpy()
+        # Note: Convert to supported dtypes first (bfloat16 not supported by numpy)
+        indices_np = expert_indices.detach().cpu().to(torch.int64).numpy().flatten()
+        weights_np = expert_weights.detach().cpu().to(torch.float32).numpy()
 
         # Reshape weights if needed for per-token statistics
         if weights_np.ndim > 1:
@@ -446,7 +447,7 @@ class RoutingExperimentRunner:
         logger.info(f"Loading model: {model_name}")
         self.model = OlmoeForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map=device,
             output_router_logits=True
         )
@@ -595,12 +596,13 @@ class RoutingExperimentRunner:
         total_tokens = 0
         correct_predictions = 0
         num_samples = 0
+        num_errors = 0
 
         start_time = time.time()
 
-        # Evaluate on all texts
+        # Evaluate on all texts (no nested progress bar - using main progress bar)
         with torch.no_grad():
-            for text in tqdm(texts, desc=f"{config.get_name()}", leave=False):
+            for text in texts:
                 try:
                     # Tokenize
                     inputs = self.tokenizer(
@@ -642,11 +644,16 @@ class RoutingExperimentRunner:
                     num_samples += 1
 
                 except Exception as e:
-                    logger.warning(f"Error processing sample: {e}")
+                    # Count errors but only log once at the end
+                    num_errors += 1
                     continue
 
         end_time = time.time()
         elapsed_time = end_time - start_time
+
+        # Log errors if any occurred
+        if num_errors > 0:
+            logger.warning(f"Skipped {num_errors} samples due to errors")
 
         # Calculate final metrics
         avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
@@ -730,6 +737,10 @@ class RoutingExperimentRunner:
         # Run all experiments
         all_results = []
 
+        # Create single progress bar for all experiments
+        total_experiments = len(configs) * len(datasets)
+        pbar = tqdm(total=total_experiments, desc="Running Experiments", unit="exp")
+
         for dataset_name in datasets:
             # Load dataset once
             texts = self.load_dataset(dataset_name, max_samples=max_samples)
@@ -737,12 +748,17 @@ class RoutingExperimentRunner:
             # Run all configs on this dataset
             for config in configs:
                 try:
+                    pbar.set_description(f"Running {config.get_name()} on {dataset_name}")
                     results = self.evaluate_configuration(
                         config, texts, dataset_name
                     )
                     all_results.append(results)
+                    pbar.update(1)
                 except Exception as e:
                     logger.error(f"Experiment failed: {config.get_name()} on {dataset_name}: {e}")
+                    pbar.update(1)
+
+        pbar.close()
 
         # Convert to DataFrame
         df = pd.DataFrame([r.to_dict() for r in all_results])
@@ -988,6 +1004,419 @@ class RoutingExperimentRunner:
             f.write(f"- Individual logs: `logs/` directory\n\n")
 
         logger.info(f"Report saved to: {report_file}")
+
+    def run_two_phase_experiment(
+        self,
+        expert_counts: List[int] = [8, 16, 32],
+        datasets: List[str] = ['wikitext'],
+        max_samples: int = 100,
+        routing_modifications: Optional[List[str]] = None
+    ) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Run two-phase routing experiment:
+        Phase 1: Analyze baseline (model's natural routing)
+        Phase 2: Apply modified routing based on insights
+        Phase 3: Compare and generate report
+
+        Args:
+            expert_counts: List of expert counts to test
+            datasets: List of datasets to evaluate on
+            max_samples: Maximum samples per dataset
+            routing_modifications: List of modifications to test (default: ['uniform', 'normalized'])
+
+        Returns:
+            Tuple of (results_df, routing_insights)
+        """
+        if routing_modifications is None:
+            routing_modifications = ['uniform', 'normalized']
+
+        logger.info("=" * 70)
+        logger.info("TWO-PHASE ROUTING EXPERIMENT")
+        logger.info("=" * 70)
+
+        # ==========================================
+        # PHASE 1: BASELINE ANALYSIS
+        # ==========================================
+        logger.info("\n" + "=" * 70)
+        logger.info("PHASE 1: BASELINE ROUTING ANALYSIS")
+        logger.info("=" * 70)
+        logger.info("Analyzing model's natural routing behavior...\n")
+
+        baseline_results = []
+        routing_insights = {}
+
+        # Ensure model patching is disabled for baseline
+        original_patching_mode = self.use_model_patching
+        self.use_model_patching = False
+
+        total_baseline = len(expert_counts) * len(datasets)
+        baseline_pbar = tqdm(total=total_baseline, desc="Phase 1: Baseline Analysis", unit="exp")
+
+        for num_experts in expert_counts:
+            self._set_expert_count(num_experts)
+
+            for dataset_name in datasets:
+                baseline_pbar.set_description(f"Baseline: {num_experts} experts on {dataset_name}")
+
+                texts = self.load_dataset(dataset_name, max_samples=max_samples)
+
+                # Create config for baseline
+                config = RoutingConfig(
+                    num_experts=num_experts,
+                    strategy='baseline',
+                    description=f"Baseline routing with {num_experts} experts"
+                )
+
+                # Run evaluation
+                results = self.evaluate_configuration(config, texts, dataset_name)
+                baseline_results.append(results)
+
+                # Collect detailed insights
+                key = f"{num_experts}_{dataset_name}"
+                routing_insights[key] = {
+                    'num_experts': num_experts,
+                    'dataset': dataset_name,
+                    'baseline_perplexity': results.perplexity,
+                    'baseline_accuracy': results.token_accuracy,
+                    'baseline_speed': results.tokens_per_second,
+                    'avg_entropy': results.avg_entropy,
+                    'avg_max_weight': results.avg_max_weight,
+                    'weight_concentration': results.weight_concentration,
+                    'unique_experts_used': results.unique_experts_activated,
+                    'expert_utilization': results.unique_experts_activated / 64  # OLMoE has 64 experts
+                }
+
+                logger.info(
+                    f"Baseline ({num_experts} experts, {dataset_name}): "
+                    f"PPL={results.perplexity:.2f}, "
+                    f"Acc={results.token_accuracy:.4f}, "
+                    f"Experts Used={results.unique_experts_activated}/64"
+                )
+
+                baseline_pbar.update(1)
+
+        baseline_pbar.close()
+
+        logger.info("\n✅ Phase 1 Complete!")
+        logger.info("\n📊 Baseline Insights:")
+        for key, insights in routing_insights.items():
+            logger.info(
+                f"  {insights['num_experts']} experts ({insights['dataset']}): "
+                f"Utilization={insights['expert_utilization']:.1%}, "
+                f"Entropy={insights['avg_entropy']:.3f}"
+            )
+
+        # ==========================================
+        # PHASE 2: MODIFIED ROUTING EXPERIMENTS
+        # ==========================================
+        logger.info("\n" + "=" * 70)
+        logger.info("PHASE 2: MODIFIED ROUTING EXPERIMENTS")
+        logger.info("=" * 70)
+        logger.info("Applying routing modifications based on Phase 1 insights...\n")
+
+        modified_results = []
+
+        total_modified = len(expert_counts) * len(datasets) * len(routing_modifications)
+        modified_pbar = tqdm(total=total_modified, desc="Phase 2: Modified Routing", unit="exp")
+
+        for num_experts in expert_counts:
+            for dataset_name in datasets:
+                texts = self.load_dataset(dataset_name, max_samples=max_samples)
+
+                for modification in routing_modifications:
+                    modified_pbar.set_description(
+                        f"Modified: {modification} with {num_experts} experts on {dataset_name}"
+                    )
+
+                    # Apply modification
+                    if modification == 'uniform':
+                        # Use model patching for uniform routing
+                        self.use_model_patching = True
+                        ModelPatchingUtils.patch_model(self.model, top_k=num_experts)
+                    else:
+                        # Use strategy-based routing (no patching)
+                        self.use_model_patching = False
+                        self._set_expert_count(num_experts)
+
+                    config = RoutingConfig(
+                        num_experts=num_experts,
+                        strategy=modification,
+                        description=f"{modification.capitalize()} routing with {num_experts} experts"
+                    )
+
+                    # Run evaluation
+                    results = self.evaluate_configuration(config, texts, dataset_name)
+                    modified_results.append(results)
+
+                    # Compare to baseline
+                    key = f"{num_experts}_{dataset_name}"
+                    baseline_ppl = routing_insights[key]['baseline_perplexity']
+                    delta_ppl = results.perplexity - baseline_ppl
+
+                    logger.info(
+                        f"Modified ({modification}, {num_experts} experts, {dataset_name}): "
+                        f"PPL={results.perplexity:.2f} (Δ{delta_ppl:+.2f}), "
+                        f"Acc={results.token_accuracy:.4f}"
+                    )
+
+                    modified_pbar.update(1)
+
+        modified_pbar.close()
+
+        # Restore original patching mode
+        self.use_model_patching = original_patching_mode
+
+        logger.info("\n✅ Phase 2 Complete!")
+
+        # ==========================================
+        # PHASE 3: COMPARATIVE ANALYSIS
+        # ==========================================
+        logger.info("\n" + "=" * 70)
+        logger.info("PHASE 3: COMPARATIVE ANALYSIS")
+        logger.info("=" * 70)
+
+        # Combine all results
+        all_results = baseline_results + modified_results
+        df = pd.DataFrame([r.to_dict() for r in all_results])
+
+        # Save results
+        csv_file = self.output_dir / "two_phase_results.csv"
+        json_file = self.output_dir / "two_phase_results.json"
+
+        df.to_csv(csv_file, index=False)
+        df.to_json(json_file, orient='records', indent=2)
+
+        # Generate comparison report
+        self._generate_two_phase_report(df, routing_insights)
+
+        # Generate comparison visualizations
+        self._visualize_two_phase_results(df, routing_insights)
+
+        logger.info(f"\n✅ Two-phase experiment complete!")
+        logger.info(f"Results saved to: {self.output_dir}")
+        logger.info("=" * 70)
+
+        return df, routing_insights
+
+    def _generate_two_phase_report(self, df: pd.DataFrame, insights: Dict):
+        """Generate detailed comparison report for two-phase experiment."""
+
+        report_file = self.output_dir / "two_phase_report.md"
+
+        with open(report_file, 'w') as f:
+            f.write("# Two-Phase Routing Experiment Report\n\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+            f.write("## Experiment Overview\n\n")
+            f.write("This experiment uses a two-phase approach:\n\n")
+            f.write("1. **Phase 1 (Baseline)**: Analyze model's natural routing behavior\n")
+            f.write("2. **Phase 2 (Modified)**: Apply custom routing strategies\n")
+            f.write("3. **Phase 3 (Analysis)**: Compare baseline vs modified routing\n\n")
+
+            # Phase 1 Summary
+            f.write("## Phase 1: Baseline Analysis\n\n")
+            f.write("| Expert Count | Dataset | Perplexity | Accuracy | Experts Used | Utilization |\n")
+            f.write("|--------------|---------|------------|----------|--------------|-------------|\n")
+
+            for key, insight in insights.items():
+                f.write(
+                    f"| {insight['num_experts']} | {insight['dataset']} | "
+                    f"{insight['baseline_perplexity']:.2f} | "
+                    f"{insight['baseline_accuracy']:.4f} | "
+                    f"{insight['unique_experts_used']}/64 | "
+                    f"{insight['expert_utilization']:.1%} |\n"
+                )
+
+            f.write("\n### Key Observations (Phase 1)\n\n")
+
+            # Analyze patterns
+            avg_utilization = np.mean([i['expert_utilization'] for i in insights.values()])
+            avg_entropy = np.mean([i['avg_entropy'] for i in insights.values()])
+
+            f.write(f"- **Average Expert Utilization**: {avg_utilization:.1%}\n")
+            f.write(f"- **Average Routing Entropy**: {avg_entropy:.3f}\n")
+
+            if avg_utilization < 0.5:
+                f.write("- ⚠️ **Low utilization detected** - many experts are underutilized\n")
+            if avg_entropy < 1.0:
+                f.write("- ⚠️ **Low entropy detected** - routing is highly concentrated\n")
+
+            f.write("\n")
+
+            # Phase 2 Results
+            f.write("## Phase 2: Modified Routing Results\n\n")
+
+            for num_experts in df['num_experts'].unique():
+                for dataset in df['dataset'].unique():
+                    f.write(f"### {num_experts} Experts - {dataset}\n\n")
+
+                    subset = df[(df['num_experts'] == num_experts) & (df['dataset'] == dataset)]
+
+                    f.write("| Strategy | Perplexity | Δ vs Baseline | Accuracy | Δ vs Baseline | Speed (tok/s) |\n")
+                    f.write("|----------|------------|---------------|----------|---------------|---------------|\n")
+
+                    baseline_row = subset[subset['strategy'] == 'baseline'].iloc[0]
+
+                    for _, row in subset.iterrows():
+                        delta_ppl = row['perplexity'] - baseline_row['perplexity']
+                        delta_acc = row['token_accuracy'] - baseline_row['token_accuracy']
+
+                        f.write(
+                            f"| {row['strategy']} | {row['perplexity']:.2f} | "
+                            f"{delta_ppl:+.2f} | {row['token_accuracy']:.4f} | "
+                            f"{delta_acc:+.4f} | {row['tokens_per_second']:.1f} |\n"
+                        )
+
+                    f.write("\n")
+
+            # Recommendations
+            f.write("## Recommendations\n\n")
+
+            # Find best configuration
+            baseline_df = df[df['strategy'] == 'baseline']
+            modified_df = df[df['strategy'] != 'baseline']
+
+            best_modified = modified_df.loc[modified_df['perplexity'].idxmin()]
+            best_baseline = baseline_df.loc[baseline_df['perplexity'].idxmin()]
+
+            if best_modified['perplexity'] < best_baseline['perplexity']:
+                improvement = best_baseline['perplexity'] - best_modified['perplexity']
+                f.write(
+                    f"✅ **Modified routing improved quality!**\n\n"
+                    f"- Best modified: {best_modified['strategy']} with {best_modified['num_experts']} experts\n"
+                    f"- Perplexity: {best_modified['perplexity']:.2f} (improved by {improvement:.2f})\n\n"
+                )
+            else:
+                f.write(
+                    f"ℹ️ **Baseline routing performs best**\n\n"
+                    f"- Modified routing did not improve quality in this experiment\n"
+                    f"- Model's natural routing may already be optimal\n\n"
+                )
+
+            f.write("## Files Generated\n\n")
+            f.write("- `two_phase_results.csv` - All experiment results\n")
+            f.write("- `two_phase_results.json` - Results in JSON format\n")
+            f.write("- `two_phase_comparison.png` - Visualization comparing phases\n")
+            f.write("- `two_phase_report.md` - This report\n\n")
+
+        logger.info(f"Two-phase report saved to: {report_file}")
+
+    def _visualize_two_phase_results(self, df: pd.DataFrame, insights: Dict):
+        """Generate visualizations comparing baseline and modified routing."""
+
+        logger.info("Generating two-phase comparison visualizations...")
+
+        fig = plt.figure(figsize=(20, 12))
+
+        # 1. Perplexity Comparison (Baseline vs Modified)
+        ax1 = plt.subplot(2, 3, 1)
+        strategies = df['strategy'].unique()
+        x = np.arange(len(df['num_experts'].unique()))
+        width = 0.25
+
+        for i, strategy in enumerate(strategies):
+            strategy_data = df[df['strategy'] == strategy].groupby('num_experts')['perplexity'].mean()
+            ax1.bar(x + i*width, strategy_data.values, width, label=strategy)
+
+        ax1.set_xlabel('Number of Experts')
+        ax1.set_ylabel('Perplexity (↓ better)')
+        ax1.set_title('Perplexity: Baseline vs Modified Routing')
+        ax1.set_xticks(x + width)
+        ax1.set_xticklabels(df['num_experts'].unique())
+        ax1.legend()
+        ax1.grid(True, alpha=0.3, axis='y')
+
+        # 2. Accuracy Comparison
+        ax2 = plt.subplot(2, 3, 2)
+        for i, strategy in enumerate(strategies):
+            strategy_data = df[df['strategy'] == strategy].groupby('num_experts')['token_accuracy'].mean()
+            ax2.bar(x + i*width, strategy_data.values, width, label=strategy)
+
+        ax2.set_xlabel('Number of Experts')
+        ax2.set_ylabel('Token Accuracy (↑ better)')
+        ax2.set_title('Accuracy: Baseline vs Modified Routing')
+        ax2.set_xticks(x + width)
+        ax2.set_xticklabels(df['num_experts'].unique())
+        ax2.legend()
+        ax2.grid(True, alpha=0.3, axis='y')
+
+        # 3. Delta Perplexity (vs Baseline)
+        ax3 = plt.subplot(2, 3, 3)
+        baseline_df = df[df['strategy'] == 'baseline']
+
+        for strategy in [s for s in strategies if s != 'baseline']:
+            deltas = []
+            expert_counts = []
+
+            for num_experts in df['num_experts'].unique():
+                baseline_ppl = baseline_df[baseline_df['num_experts'] == num_experts]['perplexity'].mean()
+                modified_ppl = df[(df['strategy'] == strategy) & (df['num_experts'] == num_experts)]['perplexity'].mean()
+                deltas.append(modified_ppl - baseline_ppl)
+                expert_counts.append(num_experts)
+
+            ax3.plot(expert_counts, deltas, marker='o', label=strategy, linewidth=2)
+
+        ax3.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+        ax3.set_xlabel('Number of Experts')
+        ax3.set_ylabel('Δ Perplexity (vs Baseline)')
+        ax3.set_title('Perplexity Change from Baseline\n(negative = improvement)')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # 4. Expert Utilization (Baseline)
+        ax4 = plt.subplot(2, 3, 4)
+        expert_counts = [insights[k]['num_experts'] for k in sorted(insights.keys())]
+        utilizations = [insights[k]['expert_utilization'] * 100 for k in sorted(insights.keys())]
+
+        ax4.bar(range(len(expert_counts)), utilizations, alpha=0.7, color='skyblue')
+        ax4.set_xlabel('Configuration')
+        ax4.set_ylabel('Expert Utilization (%)')
+        ax4.set_title('Baseline: Expert Utilization Rate')
+        ax4.set_xticks(range(len(expert_counts)))
+        ax4.set_xticklabels([f"{ec}exp" for ec in expert_counts], rotation=45)
+        ax4.grid(True, alpha=0.3, axis='y')
+
+        # 5. Routing Entropy Comparison
+        ax5 = plt.subplot(2, 3, 5)
+        for strategy in strategies:
+            strategy_data = df[df['strategy'] == strategy].groupby('num_experts')['avg_entropy'].mean()
+            ax5.plot(strategy_data.index, strategy_data.values, marker='s', label=strategy, linewidth=2)
+
+        ax5.set_xlabel('Number of Experts')
+        ax5.set_ylabel('Routing Entropy')
+        ax5.set_title('Routing Entropy: Baseline vs Modified')
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+
+        # 6. Speed-Quality Trade-off
+        ax6 = plt.subplot(2, 3, 6)
+        for strategy in strategies:
+            strategy_df = df[df['strategy'] == strategy]
+            ax6.scatter(
+                strategy_df['perplexity'],
+                strategy_df['tokens_per_second'],
+                label=strategy,
+                s=100,
+                alpha=0.7
+            )
+
+        ax6.set_xlabel('Perplexity (↓ better)')
+        ax6.set_ylabel('Tokens/Second (↑ better)')
+        ax6.set_title('Speed vs Quality Trade-off')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save
+        png_file = self.viz_dir / "two_phase_comparison.png"
+        pdf_file = self.viz_dir / "two_phase_comparison.pdf"
+
+        plt.savefig(png_file, dpi=300, bbox_inches='tight')
+        plt.savefig(pdf_file, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Two-phase visualizations saved to: {self.viz_dir}")
 
 
 if __name__ == "__main__":
