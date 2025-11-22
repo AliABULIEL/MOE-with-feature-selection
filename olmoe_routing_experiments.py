@@ -738,14 +738,27 @@ class RoutingExperimentRunner:
                             # Save internal routing data if requested
                             if save_internal_logs:
                                 # Convert to numpy for storage (sample first few tokens)
-                                max_tokens_to_log = min(10, router_logit.shape[1])  # Log first 10 tokens
-                                layer_log_data = {
-                                    'layer': layer_idx,
-                                    'router_logits_shape': list(router_logit.shape),
-                                    'selected_experts': expert_indices[:, :max_tokens_to_log, :].cpu().to(torch.int64).numpy().tolist(),
-                                    'expert_weights': expert_weights[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist(),
-                                    'router_logits_sample': router_logit[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist()
-                                }
+                                # Handle both 2D [tokens, experts] and 3D [batch, seq, experts] tensors
+                                if router_logit.dim() == 2:
+                                    # 2D: [tokens, num_experts] - flattened batch*seq
+                                    max_tokens_to_log = min(10, router_logit.shape[0])
+                                    layer_log_data = {
+                                        'layer': layer_idx,
+                                        'router_logits_shape': list(router_logit.shape),
+                                        'selected_experts': expert_indices[:max_tokens_to_log, :].cpu().to(torch.int64).numpy().tolist(),
+                                        'expert_weights': expert_weights[:max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist(),
+                                        'router_logits_sample': router_logit[:max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist()
+                                    }
+                                else:
+                                    # 3D: [batch, seq_len, num_experts]
+                                    max_tokens_to_log = min(10, router_logit.shape[1])
+                                    layer_log_data = {
+                                        'layer': layer_idx,
+                                        'router_logits_shape': list(router_logit.shape),
+                                        'selected_experts': expert_indices[:, :max_tokens_to_log, :].cpu().to(torch.int64).numpy().tolist(),
+                                        'expert_weights': expert_weights[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist(),
+                                        'router_logits_sample': router_logit[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist()
+                                    }
                                 sample_routing_data['layers'].append(layer_log_data)
 
                         if save_internal_logs:
