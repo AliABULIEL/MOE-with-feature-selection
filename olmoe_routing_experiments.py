@@ -265,10 +265,11 @@ class ModelPatchingUtils:
     def custom_select_experts(
         router_logits: torch.Tensor,
         top_k: int,
-        num_experts: int
+        num_experts: int,
+        strategy: str = 'uniform'
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Custom expert selection with uniform weights (internal logging version).
+        Custom expert selection with configurable weighting strategy.
 
         This function is designed to be integrated directly into the model's forward pass,
         enabling internal logging of router_logits while applying custom routing logic.
@@ -277,36 +278,46 @@ class ModelPatchingUtils:
             router_logits: [tokens, num_experts] - Raw routing scores
             top_k: Number of experts to select
             num_experts: Total number of experts
+            strategy: Routing strategy - 'uniform', 'normalized', or 'baseline'
 
         Returns:
-            routing_weights: [tokens, top_k] - Uniform weights (1/top_k)
+            routing_weights: [tokens, top_k] - Weights based on strategy
             selected_experts: [tokens, top_k] - Selected expert indices
         """
         # Convert logits to probabilities
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        probs = F.softmax(router_logits, dim=1, dtype=torch.float)
 
         # Select top-k experts based on probabilities
-        _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+        top_weights, selected_experts = torch.topk(probs, top_k, dim=-1)
 
-        # Give each selected expert EQUAL probability (uniform routing)
-        routing_weights = torch.ones_like(selected_experts, dtype=torch.float)
-        routing_weights /= top_k
+        # Apply weighting strategy
+        if strategy == 'uniform':
+            # Equal weights for all selected experts (1/k each)
+            routing_weights = torch.ones_like(selected_experts, dtype=torch.float)
+            routing_weights /= top_k
+        elif strategy == 'normalized':
+            # Re-normalize top-k weights to sum to 1
+            routing_weights = top_weights / (top_weights.sum(dim=-1, keepdim=True) + 1e-10)
+        else:
+            # baseline/regular - use original softmax weights
+            routing_weights = top_weights
 
         return routing_weights.to(router_logits.dtype), selected_experts
 
     @staticmethod
-    def create_patched_forward(top_k: int, num_experts: int):
+    def create_patched_forward(top_k: int, num_experts: int, strategy: str = 'uniform'):
         """
         Create a patched forward pass for OLMoE MLP layers.
 
         This replaces the standard forward pass with one that:
-        1. Uses custom_select_experts for routing
+        1. Uses custom_select_experts for routing with specified strategy
         2. Returns router_logits for internal logging
         3. Enables analysis of routing decisions
 
         Args:
             top_k: Number of experts to select
             num_experts: Total number of experts available
+            strategy: Routing strategy - 'uniform', 'normalized', or 'baseline'
 
         Returns:
             Patched forward function
@@ -318,11 +329,12 @@ class ModelPatchingUtils:
             # Get router logits: (batch * sequence_length, n_experts)
             router_logits = self.gate(hidden_states)
 
-            # Use custom expert selection
+            # Use custom expert selection with specified strategy
             routing_weights, selected_experts = ModelPatchingUtils.custom_select_experts(
                 router_logits,
                 top_k=top_k,
-                num_experts=num_experts
+                num_experts=num_experts,
+                strategy=strategy
             )
 
             # Initialize output
@@ -362,13 +374,14 @@ class ModelPatchingUtils:
         return new_forward
 
     @staticmethod
-    def patch_model(model, top_k: Optional[int] = None):
+    def patch_model(model, top_k: Optional[int] = None, strategy: str = 'uniform'):
         """
         Patch all MoE layers in the model with custom routing.
 
         Args:
             model: OLMoE model instance
             top_k: Number of experts to use (None = use model default)
+            strategy: Routing strategy - 'uniform', 'normalized', or 'baseline'
 
         Returns:
             Number of layers patched
@@ -378,21 +391,22 @@ class ModelPatchingUtils:
 
         num_experts = getattr(model.config, 'num_local_experts', 64)
 
-        logger.info(f"Patching model with custom routing: top_k={top_k}, num_experts={num_experts}")
+        logger.info(f"Patching model with {strategy} routing: top_k={top_k}, num_experts={num_experts}")
 
         patched_layers = 0
 
         for layer in model.model.layers:
             if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
-                # Create and apply patched forward
+                # Create and apply patched forward with specified strategy
                 layer.mlp.forward = ModelPatchingUtils.create_patched_forward(
                     top_k,
-                    num_experts
+                    num_experts,
+                    strategy=strategy
                 ).__get__(layer.mlp, layer.mlp.__class__)
 
                 patched_layers += 1
 
-        logger.info(f"✅ Patched {patched_layers} MoE layers with custom routing")
+        logger.info(f"✅ Patched {patched_layers} MoE layers with {strategy} routing")
         return patched_layers
 
     @staticmethod
@@ -648,10 +662,29 @@ class RoutingExperimentRunner:
         # Set expert count
         self._set_expert_count(config.num_experts)
 
+        # CRITICAL: For non-baseline strategies, patch the model to actually modify computation
+        # This is essential - without patching, all strategies give identical results!
+        original_forwards = {}
+        needs_patching = config.strategy in ['uniform', 'normalized', 'adaptive']
+
+        if needs_patching:
+            # Store original forwards for restoration later
+            for idx, layer in enumerate(self.model.model.layers):
+                if hasattr(layer, 'mlp'):
+                    original_forwards[idx] = layer.mlp.forward
+
+            # Patch model with the specified routing strategy
+            ModelPatchingUtils.patch_model(
+                self.model,
+                top_k=config.num_experts,
+                strategy=config.strategy
+            )
+            logger.info(f"Model patched with {config.strategy} routing for actual computation")
+
         # Register router hooks to capture routing data
         self._register_router_hooks(top_k=config.num_experts)
 
-        # Create routing strategy
+        # Create routing strategy (for statistics tracking)
         strategy = self.strategy_factory[config.strategy](config.num_experts)
 
         # Initialize metrics
@@ -885,6 +918,11 @@ class RoutingExperimentRunner:
                 json.dump(internal_routing_logs, f, indent=2)
 
             logger.info(f"Saved internal routing logs to: {internal_log_file}")
+
+        # Restore original forwards if we patched the model
+        if needs_patching and original_forwards:
+            ModelPatchingUtils.unpatch_model(self.model, original_forwards)
+            logger.info(f"Model restored to original routing after {config.strategy} evaluation")
 
         logger.info(
             f"Results: PPL={perplexity:.2f}, Acc={token_accuracy:.4f}, "
@@ -1325,23 +1363,15 @@ class RoutingExperimentRunner:
                         f"Modified: {modification} with {num_experts} experts on {dataset_name}"
                     )
 
-                    # Apply modification
-                    if modification == 'uniform':
-                        # Use model patching for uniform routing
-                        self.use_model_patching = True
-                        ModelPatchingUtils.patch_model(self.model, top_k=num_experts)
-                    else:
-                        # Use strategy-based routing (no patching)
-                        self.use_model_patching = False
-                        self._set_expert_count(num_experts)
-
+                    # Create config - evaluate_configuration handles patching automatically
+                    # based on the strategy (uniform, normalized -> patch, baseline -> no patch)
                     config = RoutingConfig(
                         num_experts=num_experts,
                         strategy=modification,
                         description=f"{modification.capitalize()} routing with {num_experts} experts"
                     )
 
-                    # Run evaluation
+                    # Run evaluation (patching is handled automatically by evaluate_configuration)
                     results = self.evaluate_configuration(config, texts, dataset_name)
                     modified_results.append(results)
 
