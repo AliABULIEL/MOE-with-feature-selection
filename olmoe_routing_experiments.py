@@ -448,10 +448,13 @@ class RoutingExperimentRunner:
         self.model = OlmoeForCausalLM.from_pretrained(
             model_name,
             dtype=torch.bfloat16,
-            device_map=device,
-            output_router_logits=True
+            device_map=device
         )
         self.model.eval()
+
+        # Hook management for capturing router outputs
+        self.router_hooks = []
+        self.logged_routing_data = []
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -515,6 +518,60 @@ class RoutingExperimentRunner:
                             mlp.gate.num_experts_per_tok = num_experts
 
         logger.info(f"Set expert count to: {num_experts}")
+
+    def _register_router_hooks(self, top_k: int = 8):
+        """
+        Register forward hooks on layer.mlp.gate to capture router outputs.
+
+        This is the reliable way to get routing logits - more robust than
+        output_router_logits=True parameter which doesn't always work.
+
+        Args:
+            top_k: Number of top experts to select
+        """
+        # Clear any existing hooks first
+        self._clear_router_hooks()
+
+        # Clear logged data
+        self.logged_routing_data = []
+
+        def logging_hook_router(module, input, output, layer_index, k=8):
+            """Hook to capture router outputs from gate module"""
+            try:
+                router_logits = output
+                # Apply softmax to get probabilities
+                softmax_weights = F.softmax(router_logits, dim=-1, dtype=torch.float)
+                # Get top-k experts
+                topk_weights, topk_indices = torch.topk(softmax_weights, k, dim=-1)
+
+                self.logged_routing_data.append({
+                    "layer": layer_index,
+                    "router_logits": router_logits.detach(),
+                    "expert_indices": topk_indices.detach(),
+                    "softmax_weights": topk_weights.detach(),
+                })
+            except Exception as e:
+                logger.warning(f"Error in hook for layer {layer_index}: {e}")
+
+        # Register hooks on each layer's gate
+        for i, layer in enumerate(self.model.model.layers):
+            try:
+                router_module = layer.mlp.gate
+                hook_handle = router_module.register_forward_hook(
+                    lambda m, inp, out, idx=i: logging_hook_router(m, inp, out, idx, k=top_k)
+                )
+                self.router_hooks.append(hook_handle)
+            except AttributeError:
+                logger.warning(f"Layer {i} has no 'gate' module. Skipping hook registration.")
+
+        logger.debug(f"Registered {len(self.router_hooks)} router hooks")
+
+    def _clear_router_hooks(self):
+        """Remove all registered router hooks."""
+        for hook in self.router_hooks:
+            hook.remove()
+        self.router_hooks = []
+        logger.debug("Cleared all router hooks")
 
     def load_dataset(
         self,
@@ -591,6 +648,9 @@ class RoutingExperimentRunner:
         # Set expert count
         self._set_expert_count(config.num_experts)
 
+        # Register router hooks to capture routing data
+        self._register_router_hooks(top_k=config.num_experts)
+
         # Create routing strategy
         strategy = self.strategy_factory[config.strategy](config.num_experts)
 
@@ -600,6 +660,10 @@ class RoutingExperimentRunner:
         correct_predictions = 0
         num_samples = 0
         num_errors = 0
+
+        # Track detailed errors (store first 10)
+        error_details = []
+        max_errors_to_track = 10
 
         # Internal routing logs storage
         internal_routing_logs = {
@@ -629,12 +693,20 @@ class RoutingExperimentRunner:
                     if input_ids.shape[1] < 2:
                         continue
 
-                    # Forward pass
+                    # Clear routing data from previous sample
+                    self.logged_routing_data = []
+
+                    # Forward pass (hooks will capture routing data automatically)
                     outputs = self.model(
                         input_ids=input_ids,
-                        labels=input_ids,
-                        output_router_logits=True
+                        labels=input_ids
                     )
+
+                    # Validate outputs
+                    if outputs.loss is None:
+                        raise ValueError(f"outputs.loss is None for sample {num_samples}")
+                    if outputs.logits is None:
+                        raise ValueError(f"outputs.logits is None for sample {num_samples}")
 
                     # Accumulate loss
                     loss = outputs.loss.item()
@@ -647,8 +719,8 @@ class RoutingExperimentRunner:
                     targets = input_ids[:, 1:]
                     correct_predictions += (predictions == targets).sum().item()
 
-                    # Apply routing strategy to router logits and save internal logs
-                    if outputs.router_logits is not None:
+                    # Process hook-captured routing data
+                    if len(self.logged_routing_data) > 0:
                         sample_routing_data = {
                             'sample_id': num_samples,
                             'num_tokens': input_ids.shape[1],
@@ -656,40 +728,96 @@ class RoutingExperimentRunner:
                             'layers': []
                         }
 
-                        for layer_idx, router_logit in enumerate(outputs.router_logits):
-                            if router_logit is not None:
-                                # Apply routing strategy
-                                expert_indices, expert_weights = strategy.route(router_logit)
+                        for layer_data in self.logged_routing_data:
+                            router_logit = layer_data['router_logits']
+                            layer_idx = layer_data['layer']
 
-                                # Save internal routing data if requested
-                                if save_internal_logs:
-                                    # Convert to numpy for storage (sample first few tokens)
-                                    max_tokens_to_log = min(10, router_logit.shape[1])  # Log first 10 tokens
-                                    layer_data = {
-                                        'layer': layer_idx,
-                                        'router_logits_shape': list(router_logit.shape),
-                                        'selected_experts': expert_indices[:, :max_tokens_to_log, :].cpu().to(torch.int64).numpy().tolist(),
-                                        'expert_weights': expert_weights[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist(),
-                                        'router_logits_sample': router_logit[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist()
-                                    }
-                                    sample_routing_data['layers'].append(layer_data)
+                            # Apply routing strategy
+                            expert_indices, expert_weights = strategy.route(router_logit)
+
+                            # Save internal routing data if requested
+                            if save_internal_logs:
+                                # Convert to numpy for storage (sample first few tokens)
+                                max_tokens_to_log = min(10, router_logit.shape[1])  # Log first 10 tokens
+                                layer_log_data = {
+                                    'layer': layer_idx,
+                                    'router_logits_shape': list(router_logit.shape),
+                                    'selected_experts': expert_indices[:, :max_tokens_to_log, :].cpu().to(torch.int64).numpy().tolist(),
+                                    'expert_weights': expert_weights[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist(),
+                                    'router_logits_sample': router_logit[:, :max_tokens_to_log, :].cpu().to(torch.float32).numpy().tolist()
+                                }
+                                sample_routing_data['layers'].append(layer_log_data)
 
                         if save_internal_logs:
                             internal_routing_logs['samples'].append(sample_routing_data)
+                    else:
+                        logger.warning(f"Sample {num_samples}: No routing data captured by hooks")
 
                     num_samples += 1
 
                 except Exception as e:
-                    # Count errors but only log once at the end
                     num_errors += 1
+
+                    # Capture detailed error information for first few errors
+                    if len(error_details) < max_errors_to_track:
+                        import traceback
+                        error_info = {
+                            'sample_index': num_samples,
+                            'error_type': type(e).__name__,
+                            'error_message': str(e),
+                            'text_preview': text[:100] if text else "Empty text",
+                            'text_length': len(text) if text else 0,
+                            'traceback': traceback.format_exc()
+                        }
+                        error_details.append(error_info)
                     continue
 
         end_time = time.time()
         elapsed_time = end_time - start_time
 
-        # Log errors if any occurred
+        # Log detailed errors if any occurred
         if num_errors > 0:
-            logger.warning(f"Skipped {num_errors} samples due to errors")
+            logger.error(f"=" * 70)
+            logger.error(f"⚠️  EVALUATION ERRORS: Skipped {num_errors}/{len(texts)} samples")
+            logger.error(f"=" * 70)
+
+            if error_details:
+                logger.error(f"\n📋 Detailed Error Information (first {len(error_details)} errors):\n")
+
+                for i, error in enumerate(error_details, 1):
+                    logger.error(f"\n{'='*70}")
+                    logger.error(f"Error #{i}:")
+                    logger.error(f"  Sample Index: {error['sample_index']}")
+                    logger.error(f"  Error Type: {error['error_type']}")
+                    logger.error(f"  Error Message: {error['error_message']}")
+                    logger.error(f"  Text Length: {error['text_length']} characters")
+                    logger.error(f"  Text Preview: {error['text_preview']}")
+                    logger.error(f"\n  Traceback:")
+                    for line in error['traceback'].split('\n'):
+                        logger.error(f"    {line}")
+                    logger.error(f"{'='*70}")
+
+                # Log summary of error types
+                error_types = {}
+                for error in error_details:
+                    error_type = error['error_type']
+                    error_types[error_type] = error_types.get(error_type, 0) + 1
+
+                logger.error(f"\n📊 Error Type Summary:")
+                for error_type, count in sorted(error_types.items(), key=lambda x: x[1], reverse=True):
+                    logger.error(f"  {error_type}: {count} occurrence(s)")
+
+                logger.error(f"\n💡 Troubleshooting Tips:")
+                logger.error(f"  1. Check if router hooks registered successfully on layer.mlp.gate")
+                logger.error(f"  2. Verify device compatibility (CPU vs GPU)")
+                logger.error(f"  3. Check for empty or malformed text samples")
+                logger.error(f"  4. Verify model outputs contain expected fields (loss, logits)")
+                logger.error(f"  5. Check if routing data is being captured by hooks")
+                logger.error(f"  6. Run diagnose_errors.py for detailed testing")
+                logger.error(f"=" * 70)
+            else:
+                logger.error(f"  No detailed error information captured")
+                logger.error(f"=" * 70)
 
         # Calculate final metrics
         avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')

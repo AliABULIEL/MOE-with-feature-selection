@@ -1,0 +1,35 @@
+Fix olmoe_routing_experiments.py - all 500 samples failing because router_logits aren't being captured.
+
+ISSUE: Current code uses `output_router_logits=True` which doesn't work. All samples skip with errors.
+
+SOLUTION FROM OLMOE_TESTS.IPYNB: Use forward hooks instead!
+
+The working notebook (Olmoe_tests.ipynb) shows the correct approach in Cell 7:
+1. Register hooks on layer.mlp.gate for each layer
+2. Hooks capture router_logits directly during forward pass
+3. NO need for output_router_logits=True
+
+REQUIRED CHANGES:
+
+1. Model loading - simplify like notebook Cell 5:
+   ```python
+   model = OlmoeForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+   # NO output_router_logits parameter!
+   ```
+
+2. Add hook system (based on notebook Cell 7):
+   - Register forward hooks on each layer.mlp.gate
+   - Hooks capture router_logits automatically during forward()
+   - Store in instance variable
+   - Clear between samples to avoid memory issues
+
+3. In evaluate_configuration:
+   - Replace `outputs.router_logits` usage with hook-captured data
+   - Hooks populate data automatically during forward pass
+
+4. Fix error handling - log first 5 errors with details instead of silent counting
+
+KEY: The notebook proves this works! It successfully captures routing data using hooks, not output_router_logits. Copy that pattern.
+
+TEST: expert_counts=[4], strategies=['baseline'], datasets=['wikitext'], max_samples=10
+Should process samples successfully instead of skipping all 500.
