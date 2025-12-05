@@ -597,7 +597,7 @@ class RoutingExperimentRunner:
         Load evaluation dataset.
 
         Args:
-            dataset_name: Name of dataset ('wikitext', 'lambada', 'piqa')
+            dataset_name: Name of dataset ('wikitext', 'lambada', 'piqa', 'hellaswag')
             split: Dataset split to use
             max_samples: Maximum number of samples to load
 
@@ -619,6 +619,14 @@ class RoutingExperimentRunner:
                 dataset = load_dataset('piqa', split='validation')
                 texts = [
                     f"{item['goal']} {item['sol1']}"
+                    for item in dataset
+                ]
+
+            elif dataset_name == 'hellaswag':
+                # Use validation split as test split is not publicly available
+                dataset = load_dataset('hellaswag', split='validation')
+                texts = [
+                    f"{item['ctx']} {item['endings'][int(item['label'])]}"
                     for item in dataset
                 ]
 
