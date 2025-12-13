@@ -2,7 +2,21 @@
   "permissions": {
     "allow": [
       "Bash(ls:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(git clone:*)",
+      "Bash(xargs:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(find:*)",
+      "Bash(source:*)",
+      "Bash(tree:*)",
+      "Bash(cat:*)",
+      "Bash(python test_bh_routing.py:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(chmod:*)"
     ],
     "deny": [],
     "ask": []
