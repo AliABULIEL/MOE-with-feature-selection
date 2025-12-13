@@ -6,8 +6,9 @@ This module implements the Benjamini-Hochberg (BH) procedure for expert selectio
 in sparse MoE models, providing statistical control of the False Discovery Rate (FDR).
 
 Key Features:
+- KDE-based p-values from empirical router logit distributions
 - Fully vectorized PyTorch implementation
-- GPU-compatible (no CPU transfers)
+- GPU-compatible (with CPU fallback for KDE interpolation)
 - Configurable FDR level (alpha)
 - Temperature-based calibration
 - Min/max expert constraints
@@ -23,6 +24,165 @@ import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional, Dict
 import warnings
+import numpy as np
+import os
+import pickle
+
+# Global cache for KDE models
+_kde_models_cache: Dict[int, Dict] = {}
+
+
+def load_kde_models(kde_dir: str = None) -> Dict[int, Dict]:
+    """
+    Load pre-trained KDE models for each layer.
+
+    KDE models contain empirical CDF of router logits, used to compute
+    properly calibrated p-values: p = 1 - CDF(logit)
+
+    Args:
+        kde_dir: Directory containing KDE model files
+                 Default: looks for kde_models/models/ relative to this file
+
+    Returns:
+        Dictionary mapping layer_idx -> {'x': x_grid, 'cdf': cdf_grid}
+    """
+    global _kde_models_cache
+
+    if _kde_models_cache:
+        return _kde_models_cache
+
+    if kde_dir is None:
+        # Try to find kde_models relative to this file or in common locations
+        possible_dirs = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kde_models', 'models'),
+            './kde_models/models',
+            '../kde_models/models',
+            '/content/drive/MyDrive/MOE-with-feature-selection/kde_models/models',
+        ]
+        for d in possible_dirs:
+            if os.path.exists(d):
+                kde_dir = d
+                break
+
+    if kde_dir is None or not os.path.exists(kde_dir):
+        warnings.warn(
+            f"KDE models directory not found. Will use empirical fallback method.",
+            UserWarning
+        )
+        return {}
+
+    # Load all layer models
+    loaded_count = 0
+    for layer_idx in range(16):  # OLMoE has 16 layers
+        model_path = os.path.join(kde_dir, f"distribution_model_layer_{layer_idx}.pkl")
+        if os.path.exists(model_path):
+            with open(model_path, 'rb') as f:
+                _kde_models_cache[layer_idx] = pickle.load(f)
+                loaded_count += 1
+
+    if loaded_count > 0:
+        print(f"✅ Loaded {loaded_count} KDE models from {kde_dir}")
+    else:
+        warnings.warn(f"No KDE models found in {kde_dir}", UserWarning)
+
+    return _kde_models_cache
+
+
+def compute_pvalues_kde(
+    router_logits: torch.Tensor,
+    layer_idx: int,
+    kde_models: Dict[int, Dict]
+) -> torch.Tensor:
+    """
+    Compute p-values using pre-trained KDE model for this layer.
+
+    P-value = 1 - CDF(logit)
+    - Higher logit → higher CDF → lower p-value → more significant
+    - Based on empirical distribution of router logits
+
+    Args:
+        router_logits: [num_tokens, num_experts] raw logits
+        layer_idx: Which layer (0-15 for OLMoE)
+        kde_models: Pre-loaded KDE models
+
+    Returns:
+        p_values: [num_tokens, num_experts] p-values in [0, 1]
+    """
+    device = router_logits.device
+    dtype = router_logits.dtype
+
+    if layer_idx not in kde_models or not kde_models[layer_idx]:
+        # Fallback: use empirical CDF from current batch
+        return compute_pvalues_empirical(router_logits)
+
+    model = kde_models[layer_idx]
+    x_grid = model['x']  # numpy array
+    cdf_grid = model['cdf']  # numpy array
+
+    # Convert to numpy for interpolation
+    logits_np = router_logits.detach().cpu().numpy().flatten()
+
+    # Interpolate to get CDF values
+    # Uses linear interpolation: for logit values outside x_grid range,
+    # extrapolates with boundary values (CDF=0 for low, CDF=1 for high)
+    cdf_values = np.interp(logits_np, x_grid, cdf_grid)
+
+    # P-value = 1 - CDF
+    # High logit → high CDF (close to 1) → low p-value (close to 0) → significant
+    p_values_np = 1.0 - cdf_values
+
+    # Reshape and convert back to tensor
+    p_values = torch.from_numpy(p_values_np).reshape(router_logits.shape)
+    p_values = p_values.to(device=device, dtype=dtype)
+
+    # Clamp to (0, 1) for numerical stability
+    eps = torch.finfo(dtype).eps if dtype.is_floating_point else 1e-8
+    p_values = torch.clamp(p_values, min=eps, max=1.0 - eps)
+
+    return p_values
+
+
+def compute_pvalues_empirical(router_logits: torch.Tensor) -> torch.Tensor:
+    """
+    Fallback: Compute p-values using empirical CDF from current batch.
+
+    For each expert's logits across all tokens, compute rank-based p-values.
+    This is less accurate than KDE but works without pre-trained models.
+
+    Args:
+        router_logits: [num_tokens, num_experts]
+
+    Returns:
+        p_values: [num_tokens, num_experts] empirical p-values
+    """
+    device = router_logits.device
+    dtype = router_logits.dtype
+    num_tokens, num_experts = router_logits.shape
+
+    # For each expert, compute empirical CDF across tokens
+    p_values = torch.zeros_like(router_logits)
+
+    for expert_idx in range(num_experts):
+        expert_logits = router_logits[:, expert_idx]  # [num_tokens]
+
+        # Sort logits for this expert
+        sorted_logits, _ = torch.sort(expert_logits)
+
+        # For each token, find rank and compute CDF
+        # Use searchsorted: how many values are <= this value
+        ranks = torch.searchsorted(sorted_logits, expert_logits)
+
+        # CDF = (rank + 1) / N
+        cdf = (ranks.float() + 1) / num_tokens
+
+        # P-value = 1 - CDF
+        p_values[:, expert_idx] = 1.0 - cdf
+
+    # Clamp to (0, 1)
+    eps = torch.finfo(dtype).eps if dtype.is_floating_point else 1e-8
+    p_values = torch.clamp(p_values, min=eps, max=1.0 - eps)
+
+    return p_values.to(dtype)
 
 
 def benjamini_hochberg_routing(
@@ -31,6 +191,8 @@ def benjamini_hochberg_routing(
     temperature: float = 1.0,
     min_k: int = 1,
     max_k: int = 16,
+    layer_idx: int = 0,
+    kde_models: Optional[Dict[int, Dict]] = None,
     return_stats: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -44,16 +206,41 @@ def benjamini_hochberg_routing(
     -------------------------
     Given router logits r ∈ R^N for N experts:
 
-    1. Compute probabilities: π = softmax(r / τ)
-    2. Compute pseudo p-values: p_i = 1 - π_i  (higher prob → lower p-value)
-    3. Sort p-values: p_(1) ≤ p_(2) ≤ ... ≤ p_(N)
-    4. Find largest k such that: p_(k) ≤ (k/N) × α
-    5. Select experts with k smallest p-values
-    6. Renormalize selected probabilities to sum to 1
+    1. Compute empirical p-values using KDE:
+       - Use pre-trained KDE model for this layer's router logit distribution
+       - For each logit value: p_i = 1 - CDF(r_i)
+       - Higher logit → higher CDF → lower p-value → more significant
+       - Based on actual empirical distribution, properly calibrated
 
-    The critical values c_k = (k/N) × α form a linear sequence, and the BH
-    procedure selects all hypotheses up to the last one that falls below its
-    critical value.
+    2. Sort p-values ascending: p_(1) ≤ p_(2) ≤ ... ≤ p_(N)
+
+    3. Compute BH critical values: c_k = (k/N) × α
+
+    4. Apply BH step-up procedure:
+       - Find largest k where: p_(k) ≤ c_k
+       - Select all experts with rank ≤ k (k smallest p-values)
+
+    5. Compute routing weights: π = softmax(r / τ)
+
+    6. Renormalize selected expert weights to sum to 1
+
+    Why KDE-based p-values work:
+    - Based on empirical distribution of router logits from real data
+    - P-values properly calibrated: reflect actual statistical significance
+    - High-logit experts get low p-values (as expected)
+    - Low-logit experts get high p-values (correctly rejected)
+    - BH thresholds c_k = (k/N)α work as intended
+
+    The BH step-up procedure controls the False Discovery Rate (FDR):
+    - Lower α → more conservative → fewer experts selected
+    - Higher α → more permissive → more experts selected
+    - α represents the expected proportion of false positives
+
+    NOTE: Previous p-value approaches failed:
+    - p_i = 1 - softmax(r)_i: all high (~0.85), none pass threshold
+    - log p_i = log_softmax(-r): all low, almost all pass threshold
+    - p_i = rank/N: thresholds too small (α/N), only 1 expert selected
+    KDE approach solves this by using empirical distributions.
 
     Args:
         router_logits: Router logits from MoE gating network
@@ -68,6 +255,11 @@ def benjamini_hochberg_routing(
             Ensures at least min_k experts are always activated
         max_k: Maximum number of experts to select per token (default: 16)
             Caps selection for compatibility with fixed-size expert computation
+        layer_idx: Layer index for KDE model lookup (default: 0)
+            Used to select the appropriate pre-trained KDE model
+        kde_models: Pre-loaded KDE models (optional)
+            If None, will attempt to load from default locations
+            If loading fails, falls back to empirical p-values from batch
         return_stats: If True, return additional statistics (default: False)
 
     Returns:
@@ -154,7 +346,7 @@ def benjamini_hochberg_routing(
     eps = torch.finfo(dtype).eps if dtype.is_floating_point else 1e-8
 
     # =========================================================================
-    # Step 1: Compute Softmax Probabilities
+    # Step 1: Compute Softmax Probabilities (for final weights)
     # =========================================================================
     # Apply temperature scaling and softmax
     # probs: [batch_size, seq_len, num_experts]
@@ -174,81 +366,79 @@ def benjamini_hochberg_routing(
         )
 
     # =========================================================================
-    # Step 2: Compute Pseudo P-Values
+    # Step 2: Load KDE Models and Compute P-Values
     # =========================================================================
-    # Higher probability → more significant → lower p-value
-    # p-value interpretation: probability of observing this expert by chance
-    # p_values: [batch_size, seq_len, num_experts]
-    p_values = 1.0 - probs
+    # Load KDE models if not provided
+    if kde_models is None:
+        kde_models = load_kde_models()
 
-    # Clamp to ensure p-values are in (0, 1) for numerical stability
-    p_values = torch.clamp(p_values, min=eps, max=1.0 - eps)
+    # Flatten to 2D for p-value computation
+    router_logits_2d = router_logits.view(-1, num_experts)
+
+    # Compute p-values using KDE: p = 1 - CDF(logit)
+    # Higher logit → higher CDF → lower p-value → more significant
+    p_values = compute_pvalues_kde(router_logits_2d, layer_idx, kde_models)
+    # Shape: [batch_size * seq_len, num_experts]
+
+    # Reshape back to 3D
+    p_values = p_values.view(batch_size, seq_len, num_experts)
+    # Shape: [batch_size, seq_len, num_experts]
 
     # =========================================================================
-    # Step 3: Sort P-Values (Ascending)
+    # Step 3: Sort P-Values (Ascending = Most Significant First)
     # =========================================================================
-    # sorted_pvals: [batch_size, seq_len, num_experts] - sorted in ascending order
-    # sorted_indices: [batch_size, seq_len, num_experts] - original indices
-    sorted_pvals, sorted_indices = torch.sort(p_values, dim=-1, descending=False)
+    sorted_pvals, sorted_indices = torch.sort(p_values, dim=-1)
+    # sorted_pvals[i, j, 0] is the smallest (most significant) p-value
+    # sorted_indices[i, j, k] is the original expert index for rank k
 
     # =========================================================================
     # Step 4: Compute BH Critical Values
     # =========================================================================
-    # For each rank k ∈ {1, 2, ..., N}, compute critical value c_k = (k/N) × α
-    # ranks: [num_experts]
-    ranks = torch.arange(1, num_experts + 1, device=device, dtype=torch.float32)
+    # BH threshold for rank k: (k / N) * alpha
+    k_values = torch.arange(1, num_experts + 1, device=device, dtype=torch.float32)
+    critical_values = (k_values / num_experts) * alpha
+    # Shape: [num_experts]
 
-    # critical_values: [num_experts]
-    critical_values = (ranks / num_experts) * alpha
-
-    # Broadcast to [1, 1, num_experts] for comparison
+    # Broadcast to batch dimensions: [1, 1, num_experts]
     critical_values = critical_values.view(1, 1, -1)
 
     # =========================================================================
-    # Step 5: Find BH Cutoff (Largest k where p_(k) ≤ c_k)
+    # Step 5: Apply BH Step-Up Procedure
     # =========================================================================
-    # significant: [batch_size, seq_len, num_experts] - True if p_(k) ≤ c_k
-    significant = sorted_pvals <= critical_values
+    # For each token, find the largest k where p_(k) <= critical_value_(k)
+    # BH step-up: All experts with rank <= k are selected
 
-    # Find the last (rightmost) True value in each row
-    # Method: Convert boolean to int, then find argmax of cumulative sum from right
-    # This gives us the index of the last True value
+    # Compare each sorted p-value to its threshold
+    passes_threshold = sorted_pvals <= critical_values
+    # Shape: [batch_size, seq_len, num_experts]
 
-    # First, find if ANY expert is significant
-    any_significant = significant.any(dim=-1, keepdim=True)  # [B, S, 1]
+    # Find the largest k that passes for each token
+    # Create indices [1, 2, 3, ..., N]
+    k_indices = torch.arange(1, num_experts + 1, device=device).view(1, 1, -1)
 
-    # Find the rightmost True by reversing, finding first True, then un-reversing
-    # reversed_significant: [B, S, N]
-    reversed_significant = torch.flip(significant, dims=[-1])
-
-    # Find first True in reversed array (this is the last True in original)
-    # argmax returns the first occurrence of max value (which is 1 for True)
-    reversed_positions = torch.argmax(reversed_significant.to(torch.int32), dim=-1)  # [B, S]
-
-    # Convert back to original positions
-    # If reversed_positions = k, original position = (N - 1) - k
-    num_selected = num_experts - reversed_positions  # [B, S]
-
-    # If no expert is significant, set num_selected to 0
-    # We'll enforce min_k later
-    num_selected = torch.where(
-        any_significant.squeeze(-1),
-        num_selected,
-        torch.zeros_like(num_selected)
+    # Mask indices where threshold is NOT passed
+    masked_indices = torch.where(
+        passes_threshold,
+        k_indices.float(),
+        torch.zeros_like(k_indices).float()
     )
 
-    # =========================================================================
-    # Step 6: Enforce Constraints (min_k, max_k)
-    # =========================================================================
-    # Ensure at least min_k experts are selected
-    num_selected = torch.clamp(num_selected, min=min_k, max=max_k)
+    # Take the maximum index that passed (largest k)
+    num_selected = masked_indices.max(dim=-1).values  # [batch_size, seq_len]
+
+    # Handle case where nothing passes (default to min_k)
+    num_selected = torch.where(
+        num_selected == 0,
+        torch.tensor(min_k, device=device, dtype=num_selected.dtype),
+        num_selected
+    )
+
+    # Clamp to [min_k, max_k]
+    num_selected = num_selected.clamp(min=min_k, max=max_k).long()
 
     # =========================================================================
-    # Step 7: Select Experts and Compute Weights
+    # Step 6: Select Experts and Compute Weights
     # =========================================================================
-    # For each token, select the top num_selected[token] experts
-    # Since num_selected varies per token, we need to handle this carefully
-
     # Create a mask for selected experts in the SORTED order
     # selected_mask_sorted: [batch_size, seq_len, num_experts]
     expert_ranks = torch.arange(num_experts, device=device).view(1, 1, -1)
@@ -260,7 +450,7 @@ def benjamini_hochberg_routing(
     # Convert mask from sorted order to original order
     # We need to scatter the mask using sorted_indices
     # selected_mask: [batch_size, seq_len, num_experts]
-    selected_mask = torch.zeros_like(p_values, dtype=torch.bool)
+    selected_mask = torch.zeros_like(probs, dtype=torch.bool)
     selected_mask.scatter_(
         dim=-1,
         index=sorted_indices,
@@ -326,38 +516,24 @@ def benjamini_hochberg_routing(
 
     # Prepare statistics if requested
     if return_stats:
-        # Compute BH threshold used for each token
-        # bh_threshold[b, s] = critical_values[num_selected[b, s] - 1]
-        # Need to gather the critical value at position num_selected - 1
+        # Return diagnostic information about BH procedure
+        selected_mask_output = selected_mask
+        p_values_output = p_values
+        critical_values_output = critical_values
 
         if input_is_2d:
-            # Add back batch dimension for indexing
-            num_selected_3d = num_selected.unsqueeze(0)
-        else:
-            num_selected_3d = num_selected
-
-        # Clamp indices to valid range [0, num_experts - 1]
-        gather_indices = torch.clamp(num_selected_3d - 1, min=0, max=num_experts - 1)
-        gather_indices = gather_indices.unsqueeze(-1)  # [B, S, 1]
-
-        # critical_values is [1, 1, N], expand to [B, S, N]
-        critical_values_expanded = critical_values.expand(batch_size, seq_len, -1)
-
-        # Gather the threshold
-        bh_threshold = torch.gather(critical_values_expanded, dim=-1, index=gather_indices)
-        bh_threshold = bh_threshold.squeeze(-1)  # [B, S]
-
-        if input_is_2d:
-            bh_threshold = bh_threshold.squeeze(0)
-            p_values = p_values.squeeze(0)
-            selected_mask = selected_mask.squeeze(0)
+            selected_mask_output = selected_mask.squeeze(0)
+            p_values_output = p_values.squeeze(0)
 
         stats = {
-            'p_values': p_values,
-            'bh_threshold': bh_threshold,
-            'significant_mask': selected_mask,
+            'selected_mask': selected_mask_output,
+            'num_selected': num_selected,
+            'p_values': p_values_output,
+            'critical_values': critical_values_output.squeeze(),
             'alpha': alpha,
-            'temperature': temperature
+            'temperature': temperature,
+            'layer_idx': layer_idx,
+            'kde_available': layer_idx in kde_models if kde_models else False
         }
 
         return routing_weights, selected_experts, num_selected, stats
