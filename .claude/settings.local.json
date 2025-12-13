@@ -16,7 +16,10 @@
       "Bash(cat:*)",
       "Bash(python test_bh_routing.py:*)",
       "Bash(.venv/bin/python:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(python -c:*)",
+      "Bash(test:*)",
+      "Bash(.venv/bin/pip:*)"
     ],
     "deny": [],
     "ask": []
