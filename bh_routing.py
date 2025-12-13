@@ -120,7 +120,8 @@ def compute_pvalues_kde(
     cdf_grid = model['cdf']  # numpy array
 
     # Convert to numpy for interpolation
-    logits_np = router_logits.detach().cpu().numpy().flatten()
+    # Convert bfloat16 to float32 before numpy conversion (numpy doesn't support bfloat16)
+    logits_np = router_logits.detach().cpu().float().numpy().flatten()
 
     # Interpolate to get CDF values
     # Uses linear interpolation: for logit values outside x_grid range,
