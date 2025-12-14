@@ -22,11 +22,15 @@ References:
 
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, TYPE_CHECKING
 import warnings
 import numpy as np
 import os
 import pickle
+
+# Import BHRoutingLogger for type checking only (avoid circular imports)
+if TYPE_CHECKING:
+    from bh_routing_logging import BHRoutingLogger
 
 # Global cache for KDE models
 _kde_models_cache: Dict[int, Dict] = {}
@@ -194,7 +198,11 @@ def benjamini_hochberg_routing(
     max_k: int = 16,
     layer_idx: int = 0,
     kde_models: Optional[Dict[int, Dict]] = None,
-    return_stats: bool = False
+    return_stats: bool = False,
+    logger: Optional['BHRoutingLogger'] = None,
+    log_every_n_tokens: int = 100,
+    sample_idx: int = 0,
+    token_idx: int = 0
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Implements Benjamini-Hochberg procedure for expert selection in MoE models.
@@ -262,6 +270,14 @@ def benjamini_hochberg_routing(
             If None, will attempt to load from default locations
             If loading fails, falls back to empirical p-values from batch
         return_stats: If True, return additional statistics (default: False)
+        logger: Optional BHRoutingLogger for detailed logging (default: None)
+            If provided, logs routing decisions at sampling intervals
+        log_every_n_tokens: Log every N tokens (default: 100)
+            Controls sampling rate to manage logging overhead
+        sample_idx: Sample index in the batch (default: 0)
+            Used for identifying logged entries
+        token_idx: Token index in the sequence (default: 0)
+            Used for identifying logged entries and sampling control
 
     Returns:
         routing_weights: Sparse routing weights, summing to 1 per token
@@ -509,6 +525,48 @@ def benjamini_hochberg_routing(
     # =========================================================================
     # Step 9: Prepare Outputs
     # =========================================================================
+
+    # =========================================================================
+    # LOGGING: Log routing decision if logger is provided
+    # =========================================================================
+    if logger is not None and token_idx % log_every_n_tokens == 0:
+        # Log for the specified (sample_idx, token_idx) position
+        # Handle both 2D (single sample) and 3D (batched) inputs
+        if input_is_2d:
+            # For 2D input: sample_idx=0 (implicit), token_idx is the sequence position
+            if token_idx < seq_len:
+                log_entry = {
+                    'sample_idx': sample_idx,
+                    'token_idx': token_idx,
+                    'layer_idx': layer_idx,
+                    'router_logits': router_logits[0, token_idx, :].detach().cpu().numpy(),
+                    'p_values': p_values[0, token_idx, :].detach().cpu().numpy(),
+                    'selected_experts': selected_experts[0, token_idx, :].detach().cpu().tolist(),
+                    'num_selected': int(num_selected[0, token_idx].item()),
+                    'alpha': alpha,
+                    'max_k': max_k,
+                    'min_k': min_k,
+                    'sorted_p_values': sorted_pvals[0, token_idx, :].detach().cpu().numpy(),
+                }
+                logger.log_routing_decision(log_entry)
+        else:
+            # For 3D input: use provided sample_idx and token_idx
+            if sample_idx < batch_size and token_idx < seq_len:
+                log_entry = {
+                    'sample_idx': sample_idx,
+                    'token_idx': token_idx,
+                    'layer_idx': layer_idx,
+                    'router_logits': router_logits[sample_idx, token_idx, :].detach().cpu().numpy(),
+                    'p_values': p_values[sample_idx, token_idx, :].detach().cpu().numpy(),
+                    'selected_experts': selected_experts[sample_idx, token_idx, :].detach().cpu().tolist(),
+                    'num_selected': int(num_selected[sample_idx, token_idx].item()),
+                    'alpha': alpha,
+                    'max_k': max_k,
+                    'min_k': min_k,
+                    'sorted_p_values': sorted_pvals[sample_idx, token_idx, :].detach().cpu().numpy(),
+                }
+                logger.log_routing_decision(log_entry)
+
     # If input was 2D, remove batch dimension from outputs
     if input_is_2d:
         routing_weights = routing_weights.squeeze(0)  # [seq_len, num_experts]
