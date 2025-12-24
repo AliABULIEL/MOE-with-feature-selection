@@ -151,7 +151,10 @@ def compute_pvalues_empirical(router_logits: torch.Tensor) -> torch.Tensor:
     """
     Fallback: Compute p-values using empirical CDF from current batch.
 
-    For each expert's logits across all tokens, compute rank-based p-values.
+    Two modes based on number of tokens:
+    1. Multi-token (num_tokens > 1): For each expert, compute CDF across tokens
+    2. Single-token (num_tokens == 1): Compute CDF across experts for that token
+
     This is less accurate than KDE but works without pre-trained models.
 
     Args:
@@ -164,27 +167,48 @@ def compute_pvalues_empirical(router_logits: torch.Tensor) -> torch.Tensor:
     dtype = router_logits.dtype
     num_tokens, num_experts = router_logits.shape
 
-    # For each expert, compute empirical CDF across tokens
-    p_values = torch.zeros_like(router_logits)
-
-    for expert_idx in range(num_experts):
-        expert_logits = router_logits[:, expert_idx]  # [num_tokens]
-
-        # Sort logits for this expert
-        sorted_logits, _ = torch.sort(expert_logits)
-
-        # For each token, find rank and compute CDF
-        # Use searchsorted: how many values are <= this value
-        ranks = torch.searchsorted(sorted_logits, expert_logits)
-
-        # CDF = (rank + 1) / N
-        cdf = (ranks.float() + 1) / num_tokens
-
-        # P-value = 1 - CDF
-        p_values[:, expert_idx] = 1.0 - cdf
-
-    # Clamp to (0, 1)
+    # Epsilon for numerical stability
     eps = torch.finfo(dtype).eps if dtype.is_floating_point else 1e-8
+
+    if num_tokens == 1:
+        # Single-token case: compute p-values across experts
+        # This ranks experts by their logits for this one token
+        # Higher logit → higher rank → higher CDF → lower p-value
+        
+        logits_flat = router_logits[0]  # [num_experts]
+        sorted_logits, _ = torch.sort(logits_flat)
+        
+        # For each expert, find its rank in the sorted order
+        # Use searchsorted with side='right' to handle ties correctly
+        ranks = torch.searchsorted(sorted_logits.contiguous(), logits_flat.contiguous(), side='right')
+        
+        # CDF = rank / N (rank is 1-indexed after searchsorted with side='right')
+        cdf = ranks.float() / num_experts
+        
+        # P-value = 1 - CDF
+        p_values = (1.0 - cdf).unsqueeze(0)  # [1, num_experts]
+        
+    else:
+        # Multi-token case: for each expert, compute CDF across tokens
+        p_values = torch.zeros_like(router_logits)
+
+        for expert_idx in range(num_experts):
+            expert_logits = router_logits[:, expert_idx]  # [num_tokens]
+
+            # Sort logits for this expert
+            sorted_logits, _ = torch.sort(expert_logits)
+
+            # For each token, find rank and compute CDF
+            # Use searchsorted with side='right' for proper ranking
+            ranks = torch.searchsorted(sorted_logits.contiguous(), expert_logits.contiguous(), side='right')
+
+            # CDF = rank / N
+            cdf = ranks.float() / num_tokens
+
+            # P-value = 1 - CDF
+            p_values[:, expert_idx] = 1.0 - cdf
+
+    # Clamp to (eps, 1-eps) for numerical stability
     p_values = torch.clamp(p_values, min=eps, max=1.0 - eps)
 
     return p_values.to(dtype)
