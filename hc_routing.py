@@ -1,457 +1,495 @@
 """
 Higher Criticism Routing for Mixture-of-Experts Models
-=======================================================
+======================================================
 
-This module implements the Higher Criticism (HC) procedure for expert selection
-in sparse MoE models, providing optimal sparse signal detection.
+Implements Higher Criticism (HC) statistical method for adaptive expert
+selection in sparse MoE models. HC automatically finds the signal-noise
+boundary by detecting where p-values deviate most from uniform distribution.
 
-HC is particularly effective when:
-- Most experts are irrelevant (null) for a given token
-- A few experts are relevant (non-null)
-- Signal strength varies across experts
-
-This matches expert routing scenarios perfectly!
-
-Key Features:
-- KDE-based p-values (reuses existing KDE models from BH)
-- Fully vectorized PyTorch implementation
-- GPU-compatible
-- Configurable beta parameter (search fraction)
-- Min/max expert constraints
-- Numerical stability guarantees
+Key Advantages over Benjamini-Hochberg:
+- Adaptive: finds natural threshold instead of fixed formula
+- No alpha parameter to tune
+- Selects more experts when signal is strong
 
 References:
-    Donoho, D. & Jin, J. (2004). Higher criticism for detecting sparse
-    heterogeneous mixtures. Annals of Statistics, 32(3), 962-994.
-
-    Donoho, D. & Jin, J. (2015). Higher Criticism for Large-Scale Inference,
-    Especially for Rare and Weak Effects. Statistical Science, 30(1), 1-25.
+    Donoho, D., & Jin, J. (2004). Higher criticism for detecting sparse
+    heterogeneous mixtures. The Annals of Statistics, 32(3), 962-994.
 """
 
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING
-import warnings
 import numpy as np
+from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
+import warnings
 
-# Reuse from BH routing (DO NOT DUPLICATE - import!)
+# REUSE from existing BH implementation
 from bh_routing import (
     load_kde_models,
     compute_pvalues_kde,
-    compute_pvalues_empirical,
-    compute_routing_statistics
+    compute_pvalues_empirical
 )
 
 if TYPE_CHECKING:
-    from bh_routing_logging import BHRoutingLogger
+    from hc_routing_logging import HCRoutingLogger
 
 
-def compute_hc_scores(
-    sorted_pvalues: torch.Tensor,
-    beta: float = 0.5
-) -> Tuple[torch.Tensor, torch.Tensor]:
+# =============================================================================
+# CORE HC FUNCTIONS
+# =============================================================================
+
+def compute_hc_statistic(
+    p_values_sorted: torch.Tensor,
+    n: int,
+    eps: float = 1e-10
+) -> torch.Tensor:
     """
-    Compute Higher Criticism scores for each rank.
+    Compute Higher Criticism statistic for each rank.
 
-    The HC statistic measures the standardized deviation between expected
-    and observed p-value distributions:
-
-    HC(i) = √n × (i/n - p₍ᵢ₎) / √(p₍ᵢ₎(1 - p₍ᵢ₎))
-
-    Where:
-    - n = number of tests (experts)
-    - i/n = expected fraction under uniform null
-    - p₍ᵢ₎ = i-th sorted p-value (observed)
-    - Denominator = standard error
+    HC(i) = sqrt(N) * (i/N - p_(i)) / sqrt(p_(i) * (1 - p_(i)))
 
     Args:
-        sorted_pvalues: [num_tokens, num_experts] p-values ALREADY SORTED ascending
-                       sorted_pvalues[t, 0] is smallest p-value for token t
-        beta: Search fraction in (0, 1]. Only compute HC for ranks 1 to floor(β×n)
-              Default 0.5 means search first half of ranks.
+        p_values_sorted: Sorted p-values [num_tokens, num_experts], ascending order
+        n: Total number of experts (64 for OLMoE)
+        eps: Small constant for numerical stability
 
     Returns:
-        hc_scores: [num_tokens, num_experts] HC score at each rank
-                  Ranks > floor(β×n) have score = -inf (excluded from search)
-        i_star: [num_tokens] optimal rank (1-indexed) where HC is maximized
-                This is the number of experts to select.
+        hc_stats: HC statistic at each rank [num_tokens, num_experts]
 
-    Example:
-        >>> p_sorted = torch.tensor([[0.01, 0.05, 0.15, 0.35, 0.50, 0.65, 0.75, 0.85]])
-        >>> hc_scores, i_star = compute_hc_scores(p_sorted, beta=0.5)
-        >>> # HC computed for ranks 1-4 (half of 8)
-        >>> # i_star[0] = rank with maximum HC
-
-    Notes:
-        - Higher HC score indicates stronger evidence of signal
-        - i_star = 1 means only 1 expert should be selected
-        - Numerical stability: p-values clamped to (eps, 1-eps)
+    Note:
+        - Positive HC means p-value is BELOW expected (signal)
+        - Negative HC means p-value is ABOVE expected (noise)
+        - We look for maximum POSITIVE HC to find signal-noise boundary
     """
-    device = sorted_pvalues.device
-    dtype = sorted_pvalues.dtype
-    num_tokens, num_experts = sorted_pvalues.shape
+    device = p_values_sorted.device
+    dtype = p_values_sorted.dtype
+    num_tokens = p_values_sorted.shape[0]
 
-    # Numerical stability
-    eps = 1e-10
-    sorted_pvalues = torch.clamp(sorted_pvalues, min=eps, max=1.0 - eps)
+    # Expected p-values under uniform: i/N for i = 1, 2, ..., N
+    ranks = torch.arange(1, n + 1, device=device, dtype=dtype)  # [1, 2, ..., 64]
+    expected = ranks / n  # [1/64, 2/64, ..., 64/64]
 
-    # Maximum rank to search
-    max_rank = max(1, int(beta * num_experts))
+    # Expand for batch computation
+    expected = expected.unsqueeze(0).expand(num_tokens, -1)  # [num_tokens, 64]
 
-    # Create rank indices [1, 2, 3, ..., n] (1-indexed)
-    ranks = torch.arange(1, num_experts + 1, device=device, dtype=torch.float32)
-    ranks = ranks.view(1, -1).expand(num_tokens, -1)  # [num_tokens, num_experts]
+    # Clamp p-values for numerical stability
+    p_clamped = torch.clamp(p_values_sorted, min=eps, max=1.0 - eps)
 
-    # Expected fraction under uniform null: i/n
-    expected = ranks / num_experts  # [num_tokens, num_experts]
+    # Compute HC statistic
+    # Numerator: deviation from expected
+    numerator = expected - p_clamped  # positive when p < expected (signal)
 
-    # Observed: sorted p-values
-    observed = sorted_pvalues  # [num_tokens, num_experts]
+    # Denominator: standard error under uniform
+    denominator = torch.sqrt(p_clamped * (1.0 - p_clamped) + eps)
 
-    # Standard error: sqrt(p * (1 - p))
-    se = torch.sqrt(observed * (1.0 - observed) + eps)  # [num_tokens, num_experts]
+    # HC statistic
+    sqrt_n = np.sqrt(n)
+    hc_stats = sqrt_n * numerator / denominator
 
-    # HC score: sqrt(n) * (expected - observed) / se
-    sqrt_n = np.sqrt(num_experts)
-    hc_scores = sqrt_n * (expected - observed) / se  # [num_tokens, num_experts]
+    return hc_stats
 
-    # Mask out ranks > max_rank (set to -inf so they won't be selected)
-    rank_mask = ranks <= max_rank  # [num_tokens, num_experts]
-    hc_scores = torch.where(rank_mask, hc_scores, torch.tensor(float('-inf'), device=device))
 
-    # Find i* = argmax(HC) for each token
-    # Note: argmax returns 0-indexed, but we want 1-indexed rank
-    i_star_0indexed = hc_scores.argmax(dim=-1)  # [num_tokens]
-    i_star = i_star_0indexed + 1  # Convert to 1-indexed rank
+def find_hc_threshold(
+    hc_stats: torch.Tensor,
+    p_values_sorted: torch.Tensor,
+    n: int,
+    min_k: int = 1,
+    max_k: int = 16,
+    beta: float = 0.5,
+    hc_variant: str = 'plus'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Find the HC threshold - the rank with maximum HC statistic.
 
-    # Handle edge case: if all HC scores are -inf or negative, default to 1
-    max_hc = hc_scores.max(dim=-1).values
-    i_star = torch.where(max_hc > float('-inf'), i_star, torch.ones_like(i_star))
+    Implements three variants from Donoho & Jin (2004):
+    - 'standard': HC_n = max over all ranks
+    - 'plus': HC⁺_n = max where p < expected (RECOMMENDED)
+    - 'star': HC*_{n,β} = max over first β fraction of ranks
 
-    return hc_scores, i_star
+    Args:
+        hc_stats: HC statistics [num_tokens, num_experts]
+        p_values_sorted: Sorted p-values [num_tokens, num_experts]
+        n: Number of experts
+        min_k: Minimum experts to select (safety floor)
+        max_k: Maximum experts to select (ceiling)
+        beta: Search fraction β ∈ (0, 1] for 'star' variant
+        hc_variant: Which HC formula - 'standard', 'plus', or 'star'
+
+    Returns:
+        num_selected: Number of experts per token [num_tokens]
+        threshold_ranks: Which rank had max HC [num_tokens]
+        max_hc_values: Maximum HC value per token [num_tokens]
+
+    References:
+        Donoho, D., & Jin, J. (2004). Higher criticism for detecting sparse
+        heterogeneous mixtures. The Annals of Statistics, 32(3), 962-994.
+    """
+    device = hc_stats.device
+    num_tokens = hc_stats.shape[0]
+
+    # Create mask based on HC variant (from Donoho & Jin 2004)
+    if hc_variant == 'plus':
+        # HC⁺: Only consider ranks where p < expected (i.e., positive HC)
+        # This focuses on the "signal" region - most robust variant
+        ranks = torch.arange(1, n + 1, device=device).float()
+        expected = ranks / n
+        expected = expected.unsqueeze(0).expand(num_tokens, -1)
+        valid_mask = p_values_sorted < expected  # [num_tokens, num_experts]
+
+    elif hc_variant == 'star':
+        # HC*_{n,β}: Only search first β fraction of ranks
+        # β controls how conservative the search is
+        max_search = int(n * beta)
+        valid_mask = torch.zeros_like(hc_stats, dtype=torch.bool)
+        valid_mask[:, :max_search] = True
+
+    else:  # 'standard'
+        # HC_n: Standard HC - consider all ranks
+        valid_mask = torch.ones_like(hc_stats, dtype=torch.bool)
+
+    # Apply min_k and max_k constraints to valid mask
+    # Don't search below min_k or above max_k
+    valid_mask[:, :min_k-1] = False  # Must select at least min_k
+    valid_mask[:, max_k:] = False     # Can't select more than max_k
+
+    # Set invalid positions to -inf so they're never selected
+    hc_masked = hc_stats.clone()
+    hc_masked[~valid_mask] = float('-inf')
+
+    # Find maximum HC and its position
+    max_hc_values, threshold_ranks = torch.max(hc_masked, dim=1)
+
+    # threshold_ranks is 0-indexed, so num_selected = threshold_ranks + 1
+    num_selected = threshold_ranks + 1
+
+    # Handle edge case: if all positions were invalid (no signal found)
+    # Fall back to min_k selection
+    no_valid = (max_hc_values == float('-inf'))
+    num_selected[no_valid] = min_k
+    threshold_ranks[no_valid] = min_k - 1
+    max_hc_values[no_valid] = 0.0
+
+    # Enforce constraints
+    num_selected = torch.clamp(num_selected, min=min_k, max=max_k)
+
+    return num_selected, threshold_ranks, max_hc_values
 
 
 def higher_criticism_routing(
     router_logits: torch.Tensor,
-    beta: float = 0.5,
     temperature: float = 1.0,
     min_k: int = 1,
     max_k: int = 16,
     layer_idx: int = 0,
     kde_models: Optional[Dict[int, Dict]] = None,
+    beta: float = 0.5,
+    hc_variant: str = 'plus',
     return_stats: bool = False,
-    logger: Optional['BHRoutingLogger'] = None,
+    logger: Optional['HCRoutingLogger'] = None,
     log_every_n_tokens: int = 100,
     sample_idx: int = 0,
     token_idx: int = 0
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict]]:
     """
-    Implements Higher Criticism procedure for expert selection in MoE models.
+    Higher Criticism routing for adaptive expert selection in MoE models.
 
-    HC is optimal for sparse signal detection - finding the few relevant experts
-    among many irrelevant ones. Unlike BH which uses a fixed threshold (α),
-    HC automatically finds the optimal cutoff by maximizing a test statistic.
+    HC automatically finds where p-values deviate most from uniform distribution,
+    identifying the natural boundary between "signal" (relevant experts) and
+    "noise" (irrelevant experts).
 
-    Algorithm:
-    1. Compute p-values using KDE: p_i = 1 - CDF(logit_i)
-       (Higher logit → higher CDF → lower p-value → more significant)
-    2. Sort p-values ascending (smallest = most significant first)
-    3. Compute HC score at each rank i for i ∈ [1, β×n]
-    4. Find i* = argmax(HC) - the optimal number of experts
-    5. Select top i* experts (those with smallest p-values)
-    6. Apply constraints: clamp i* to [min_k, max_k]
-    7. Compute routing weights via softmax and renormalize
+    Implements the HC method from Donoho & Jin (2004) with three variants:
+    - HC (standard): max over all ranks
+    - HC⁺ (plus): max where p < expected [RECOMMENDED]
+    - HC* (star): max over first β fraction of ranks
 
     Args:
         router_logits: Router output logits
-            Shape: [batch_size, seq_len, num_experts] or [num_tokens, num_experts]
-        beta: HC search fraction in (0, 1]. Default: 0.5
-            - β=0.3: Conservative, search first 30% of ranks → fewer experts
-            - β=0.5: Balanced, search first half → moderate selection
-            - β=0.7: Inclusive, search first 70% → more experts
-            HC statistic is computed for ranks 1 to floor(β × num_experts).
-        temperature: Softmax temperature for probability computation. Default: 1.0
-            Higher → more uniform weights, Lower → sharper weights
-        min_k: Minimum experts to select per token. Default: 1
-            Enforced after HC selection (i* clamped to ≥ min_k)
-        max_k: Maximum experts to select per token. Default: 16
-            Enforced after HC selection (i* clamped to ≤ max_k)
-        layer_idx: Layer index (0-15) for KDE model lookup. Default: 0
-        kde_models: Pre-loaded KDE models dict. If None, loads from default path.
-        return_stats: If True, return additional statistics dict. Default: False
-        logger: Optional BHRoutingLogger for detailed logging
-        log_every_n_tokens: Logging sampling rate. Default: 100
-        sample_idx, token_idx: Position identifiers for logging
+            Shape: [batch, seq_len, num_experts] or [num_tokens, num_experts]
+        temperature: Temperature for softmax weight computation (default: 1.0)
+        min_k: Minimum experts to select per token (safety floor)
+        max_k: Maximum experts to select per token (ceiling)
+        layer_idx: Which transformer layer (0-15) for KDE model lookup
+        kde_models: Pre-loaded KDE models. If None, loads automatically.
+        beta: Search fraction β ∈ (0, 1] for 'star' variant.
+              Controls how much of the ranking to search (e.g., β=0.5 → first half)
+        hc_variant: HC variant to use:
+            - 'plus': HC⁺ - Only where p < expected (RECOMMENDED, most robust)
+            - 'standard': HC - All ranks considered
+            - 'star': HC* - Only first β fraction of ranks
+        return_stats: If True, return additional statistics dict
+        logger: Optional HCRoutingLogger for detailed logging
+        log_every_n_tokens: How often to log (every N tokens)
+        sample_idx: Sample index for logging
+        token_idx: Starting token index for logging
 
     Returns:
-        routing_weights: Sparse routing weights
-            Shape: [batch_size, seq_len, num_experts] or [num_tokens, num_experts]
-            Non-selected experts have weight 0. Selected weights sum to 1.
-        selected_experts: Indices of selected experts, padded with -1
-            Shape: [batch_size, seq_len, max_k] or [num_tokens, max_k]
+        routing_weights: Normalized weights for selected experts
+            Shape: [batch, seq_len, num_experts]
+        selected_experts: Indices of selected experts (padded with -1)
+            Shape: [batch, seq_len, max_k]
         expert_counts: Number of experts selected per token
-            Shape: [batch_size, seq_len] or [num_tokens]
-
-        If return_stats=True, also returns:
-            stats: Dict containing:
-                - 'hc_scores': HC scores at each rank
-                - 'i_star': Optimal rank before constraints
-                - 'p_values': Computed p-values
-                - 'sorted_pvalues': Sorted p-values
-                - 'sorted_indices': Expert indices in sorted order
-                - 'beta': Beta parameter used
+            Shape: [batch, seq_len]
+        stats (optional): Dict with 'p_values', 'hc_stats', 'threshold_ranks', etc.
 
     Example:
-        >>> logits = torch.randn(2, 10, 64)  # [batch, seq, experts]
+        >>> logits = torch.randn(1, 10, 64)  # batch=1, seq=10, experts=64
         >>> weights, experts, counts = higher_criticism_routing(
-        ...     logits, beta=0.5, max_k=8
-        ... )
-        >>> print(weights.sum(dim=-1))  # All 1.0
-        >>> print(counts)  # Variable, typically 1-8
+        ...     logits, min_k=4, max_k=12, beta=0.5, hc_variant='plus'
+        ... )[:3]
+        >>> print(counts)  # Adaptive: might be [6, 8, 5, 7, ...] not fixed 8
 
-    Comparison with BH Routing:
-        - BH: Uses threshold p₍ₖ₎ ≤ (k/n)×α, requires tuning α
-        - HC: Uses argmax of HC statistic, fully adaptive
-        - Both use same KDE p-value computation
-        - HC often selects fewer experts for "easy" tokens
+    References:
+        Donoho, D., & Jin, J. (2004). Higher criticism for detecting sparse
+        heterogeneous mixtures. The Annals of Statistics, 32(3), 962-994.
     """
     # =========================================================================
-    # Input Validation
+    # STEP 1: Input validation and reshaping
     # =========================================================================
-    if not isinstance(router_logits, torch.Tensor):
-        raise TypeError(f"router_logits must be torch.Tensor, got {type(router_logits)}")
+    original_shape = router_logits.shape
+    device = router_logits.device
 
-    if router_logits.ndim not in [2, 3]:
-        raise ValueError(
-            f"router_logits must be 2D or 3D, got shape {router_logits.shape}"
-        )
-
-    # Handle 2D input
-    input_is_2d = router_logits.ndim == 2
-    if input_is_2d:
+    # Handle different input shapes
+    if router_logits.dim() == 2:
+        # [num_tokens, num_experts]
         router_logits = router_logits.unsqueeze(0)  # [1, num_tokens, num_experts]
+        was_2d = True
+    else:
+        was_2d = False
 
     batch_size, seq_len, num_experts = router_logits.shape
 
-    # Validate parameters
-    if not 0.0 < beta <= 1.0:
-        raise ValueError(f"beta must be in (0, 1], got {beta}")
-
-    if temperature <= 0:
-        raise ValueError(f"temperature must be positive, got {temperature}")
-
-    if not 1 <= min_k <= num_experts:
-        raise ValueError(f"min_k must be in [1, {num_experts}], got {min_k}")
-
-    if not min_k <= max_k <= num_experts:
-        raise ValueError(f"max_k must be in [{min_k}, {num_experts}], got {max_k}")
-
-    device = router_logits.device
-    dtype = router_logits.dtype
-    eps = 1e-10
+    # Flatten to [num_tokens, num_experts] for batch processing
+    logits_flat = router_logits.view(-1, num_experts)  # [B*S, E]
+    num_tokens = logits_flat.shape[0]
 
     # =========================================================================
-    # Step 1: Compute Softmax Probabilities (for final weights)
-    # =========================================================================
-    scaled_logits = router_logits / temperature
-    probs = F.softmax(scaled_logits, dim=-1, dtype=torch.float32).to(dtype)
-
-    # =========================================================================
-    # Step 2: Load KDE Models and Compute P-Values
+    # STEP 2: Load KDE models if not provided
     # =========================================================================
     if kde_models is None:
         kde_models = load_kde_models()
-
-    # Flatten to 2D for p-value computation
-    router_logits_2d = router_logits.view(-1, num_experts)
-
-    # Compute p-values: p = 1 - CDF(logit)
-    p_values = compute_pvalues_kde(router_logits_2d, layer_idx, kde_models)
-    p_values = p_values.view(batch_size, seq_len, num_experts)
+        if not kde_models:
+            warnings.warn("KDE models not found. Using empirical p-values.")
 
     # =========================================================================
-    # Step 3: Sort P-Values Ascending
+    # STEP 3: Compute p-values using KDE (reuse from BH)
     # =========================================================================
-    sorted_pvals, sorted_indices = torch.sort(p_values, dim=-1)
-    # sorted_pvals[b, s, 0] = smallest p-value (most significant)
-    # sorted_indices[b, s, k] = original expert index for rank k
-
-    # =========================================================================
-    # Step 4: Compute HC Scores and Find i*
-    # =========================================================================
-    # Flatten for HC computation
-    sorted_pvals_2d = sorted_pvals.view(-1, num_experts)
-
-    hc_scores, i_star = compute_hc_scores(sorted_pvals_2d, beta=beta)
-
-    # Reshape back
-    hc_scores = hc_scores.view(batch_size, seq_len, num_experts)
-    i_star = i_star.view(batch_size, seq_len)
+    if kde_models and layer_idx in kde_models:
+        p_values = compute_pvalues_kde(logits_flat, layer_idx, kde_models)
+    else:
+        p_values = compute_pvalues_empirical(logits_flat)
 
     # =========================================================================
-    # Step 5: Apply Constraints [min_k, max_k]
+    # STEP 4: Sort p-values ascending (smallest first = most significant)
     # =========================================================================
-    num_selected = i_star.clone()
-    num_selected = num_selected.clamp(min=min_k, max=max_k)
-
-    # =========================================================================
-    # Step 6: Create Selection Mask and Compute Weights
-    # =========================================================================
-    # Create mask in sorted order
-    expert_ranks = torch.arange(num_experts, device=device).view(1, 1, -1)
-    expert_ranks = expert_ranks.expand(batch_size, seq_len, -1)
-
-    # selected_mask_sorted[b, s, k] = True if k < num_selected[b, s]
-    selected_mask_sorted = expert_ranks < num_selected.unsqueeze(-1)
-
-    # Convert mask from sorted order to original expert order
-    selected_mask = torch.zeros_like(probs, dtype=torch.bool)
-    selected_mask.scatter_(dim=-1, index=sorted_indices, src=selected_mask_sorted)
-
-    # Apply mask to probabilities
-    routing_weights = torch.where(selected_mask, probs, torch.zeros_like(probs))
-
-    # Renormalize to sum to 1
-    weight_sums = routing_weights.sum(dim=-1, keepdim=True).clamp(min=eps)
-    routing_weights = routing_weights / weight_sums
+    p_sorted, sort_indices = torch.sort(p_values, dim=1)  # [num_tokens, 64]
 
     # =========================================================================
-    # Step 7: Extract Selected Expert Indices (padded to max_k)
+    # STEP 5: Compute HC statistics
     # =========================================================================
-    selected_experts = torch.full(
-        (batch_size, seq_len, max_k),
-        fill_value=-1,
-        dtype=torch.long,
-        device=device
+    hc_stats = compute_hc_statistic(p_sorted, num_experts)  # [num_tokens, 64]
+
+    # =========================================================================
+    # STEP 6: Find HC threshold (where to cut off selection)
+    # =========================================================================
+    num_selected, threshold_ranks, max_hc_values = find_hc_threshold(
+        hc_stats, p_sorted, num_experts,
+        min_k=min_k, max_k=max_k, beta=beta, hc_variant=hc_variant
     )
 
-    for k_idx in range(max_k):
-        slot_active = k_idx < num_selected
-        expert_idx = sorted_indices[:, :, k_idx]
-        selected_experts[:, :, k_idx] = torch.where(
-            slot_active, expert_idx, torch.full_like(expert_idx, -1)
-        )
+    # =========================================================================
+    # STEP 7: Create selection mask
+    # =========================================================================
+    # For each token, select experts with rank <= num_selected
+    ranks = torch.arange(num_experts, device=device).unsqueeze(0)  # [1, 64]
+    ranks = ranks.expand(num_tokens, -1)  # [num_tokens, 64]
+
+    # Mask: True for selected experts (in sorted order)
+    selection_mask_sorted = ranks < num_selected.unsqueeze(1)  # [num_tokens, 64]
+
+    # Map back to original expert indices
+    selection_mask = torch.zeros_like(p_values, dtype=torch.bool)
+    selection_mask.scatter_(1, sort_indices, selection_mask_sorted)
 
     # =========================================================================
-    # Step 8: Logging (if logger provided)
+    # STEP 8: Get selected expert indices (padded with -1)
     # =========================================================================
-    if logger is not None and token_idx % log_every_n_tokens == 0:
-        if input_is_2d:
-            if token_idx < seq_len:
+    # Find which experts are selected for each token
+    selected_experts = torch.full((num_tokens, max_k), -1, device=device, dtype=torch.long)
+
+    for t in range(num_tokens):
+        # Get indices of selected experts (sorted by p-value, i.e., best first)
+        selected_idx = sort_indices[t, :num_selected[t]]
+        selected_experts[t, :len(selected_idx)] = selected_idx
+
+    # =========================================================================
+    # STEP 9: Compute routing weights
+    # =========================================================================
+    # Apply temperature
+    scaled_logits = logits_flat / temperature
+
+    # Compute softmax weights
+    weights = F.softmax(scaled_logits, dim=-1)
+
+    # Zero out non-selected experts
+    routing_weights = weights * selection_mask.float()
+
+    # Renormalize to sum to 1
+    weight_sum = routing_weights.sum(dim=-1, keepdim=True)
+    weight_sum = torch.clamp(weight_sum, min=1e-10)
+    routing_weights = routing_weights / weight_sum
+
+    # =========================================================================
+    # STEP 10: Logging (if logger provided)
+    # =========================================================================
+    if logger is not None:
+        for t in range(num_tokens):
+            if (token_idx + t) % log_every_n_tokens == 0:
                 log_entry = {
                     'sample_idx': sample_idx,
-                    'token_idx': token_idx,
+                    'token_idx': token_idx + t,
                     'layer_idx': layer_idx,
-                    'method': 'hc',
+                    'router_logits': logits_flat[t].cpu().tolist(),
+                    'p_values': p_values[t].cpu().tolist(),
+                    'p_values_sorted': p_sorted[t].cpu().tolist(),
+                    'hc_statistics': hc_stats[t].cpu().tolist(),
+                    'hc_threshold_rank': threshold_ranks[t].item(),
+                    'hc_max_value': max_hc_values[t].item(),
+                    'num_selected': num_selected[t].item(),
+                    'selected_experts': selected_experts[t].cpu().tolist(),
+                    'routing_weights': routing_weights[t].cpu().tolist(),
                     'beta': beta,
-                    'router_logits': router_logits[0, token_idx, :].detach().cpu().numpy(),
-                    'p_values': p_values[0, token_idx, :].detach().cpu().numpy(),
-                    'hc_scores': hc_scores[0, token_idx, :].detach().cpu().numpy(),
-                    'i_star': int(i_star[0, token_idx].item()),
-                    'num_selected': int(num_selected[0, token_idx].item()),
-                    'selected_experts': selected_experts[0, token_idx, :].detach().cpu().tolist(),
-                    'max_k': max_k,
+                    'hc_variant': hc_variant,
                     'min_k': min_k,
+                    'max_k': max_k,
                 }
                 logger.log_routing_decision(log_entry)
 
     # =========================================================================
-    # Step 9: Prepare Output
+    # STEP 11: Reshape outputs to match input shape
     # =========================================================================
-    if input_is_2d:
+    routing_weights = routing_weights.view(batch_size, seq_len, num_experts)
+    selected_experts = selected_experts.view(batch_size, seq_len, max_k)
+    expert_counts = num_selected.view(batch_size, seq_len)
+
+    if was_2d:
         routing_weights = routing_weights.squeeze(0)
         selected_experts = selected_experts.squeeze(0)
-        num_selected = num_selected.squeeze(0)
-        if return_stats:
-            hc_scores = hc_scores.squeeze(0)
-            p_values = p_values.squeeze(0)
-            sorted_pvals = sorted_pvals.squeeze(0)
-            sorted_indices = sorted_indices.squeeze(0)
-            i_star = i_star.squeeze(0)
+        expert_counts = expert_counts.squeeze(0)
 
+    # =========================================================================
+    # STEP 12: Return results
+    # =========================================================================
     if return_stats:
         stats = {
-            'hc_scores': hc_scores,
-            'i_star': i_star,
-            'p_values': p_values,
-            'sorted_pvalues': sorted_pvals,
-            'sorted_indices': sorted_indices,
-            'beta': beta,
-            'temperature': temperature,
-            'layer_idx': layer_idx,
-            'kde_available': layer_idx in kde_models if kde_models else False
+            'p_values': p_values.view(batch_size, seq_len, num_experts) if not was_2d else p_values,
+            'hc_statistics': hc_stats.view(batch_size, seq_len, num_experts) if not was_2d else hc_stats,
+            'threshold_ranks': threshold_ranks.view(batch_size, seq_len) if not was_2d else threshold_ranks,
+            'max_hc_values': max_hc_values.view(batch_size, seq_len) if not was_2d else max_hc_values,
         }
-        return routing_weights, selected_experts, num_selected, stats
+        return routing_weights, selected_experts, expert_counts, stats
 
-    return routing_weights, selected_experts, num_selected
+    return routing_weights, selected_experts, expert_counts, None
 
 
-def run_hc_multi_beta(
-    router_logits: torch.Tensor,
-    beta_values: list = None,
-    temperature: float = 1.0,
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def compute_hc_routing_statistics(
+    expert_counts: torch.Tensor,
+    routing_weights: torch.Tensor,
+    threshold_ranks: Optional[torch.Tensor] = None,
+    max_hc_values: Optional[torch.Tensor] = None,
     min_k: int = 1,
-    max_k: int = 16,
-    kde_models: Optional[Dict] = None
-) -> Dict[float, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    max_k: int = 16
+) -> Dict[str, float]:
     """
-    Run HC routing with multiple beta values for comparison.
+    Compute summary statistics for HC routing.
 
     Args:
-        router_logits: [batch, seq, experts] or [tokens, experts]
-        beta_values: List of beta values to test (default: [0.3, 0.5, 0.7, 1.0])
-        temperature: Softmax temperature
-        min_k: Minimum experts
-        max_k: Maximum experts
-        kde_models: Pre-loaded KDE models
+        expert_counts: Number of experts per token [num_tokens]
+        routing_weights: Routing weights [num_tokens, num_experts]
+        threshold_ranks: HC threshold rank per token [num_tokens]
+        max_hc_values: Maximum HC value per token [num_tokens]
+        min_k: Minimum experts configuration
+        max_k: Maximum experts configuration
 
     Returns:
-        Dict mapping beta -> (routing_weights, selected_experts, expert_counts)
+        Dict with statistics:
+        - avg_experts, std_experts, min_experts, max_experts
+        - floor_hit_rate, ceiling_hit_rate, mid_range_rate
+        - avg_hc_threshold, std_hc_threshold (if provided)
+        - avg_hc_max, std_hc_max (if provided)
+        - selection_entropy, expert_activation_ratio
     """
-    if beta_values is None:
-        beta_values = [0.3, 0.5, 0.7, 1.0]
+    counts = expert_counts.float()
 
-    if kde_models is None:
-        kde_models = load_kde_models()
+    stats = {
+        'avg_experts': counts.mean().item(),
+        'std_experts': counts.std().item() if len(counts) > 1 else 0.0,
+        'min_experts': counts.min().item(),
+        'max_experts': counts.max().item(),
+        'adaptive_range': (counts.max() - counts.min()).item(),
+    }
 
-    results = {}
-    for beta in beta_values:
-        weights, experts, counts = higher_criticism_routing(
-            router_logits,
-            beta=beta,
-            temperature=temperature,
-            min_k=min_k,
-            max_k=max_k,
-            kde_models=kde_models
-        )
-        results[beta] = (weights, experts, counts)
+    # Floor/ceiling hit rates
+    num_tokens = len(counts)
+    stats['floor_hit_rate'] = (counts == min_k).sum().item() / num_tokens * 100
+    stats['ceiling_hit_rate'] = (counts == max_k).sum().item() / num_tokens * 100
+    stats['mid_range_rate'] = 100 - stats['floor_hit_rate'] - stats['ceiling_hit_rate']
 
-    return results
+    # HC-specific statistics
+    if threshold_ranks is not None:
+        ranks = threshold_ranks.float()
+        stats['avg_hc_threshold'] = ranks.mean().item()
+        stats['std_hc_threshold'] = ranks.std().item() if len(ranks) > 1 else 0.0
+
+    if max_hc_values is not None:
+        hc_max = max_hc_values.float()
+        stats['avg_hc_max'] = hc_max.mean().item()
+        stats['std_hc_max'] = hc_max.std().item() if len(hc_max) > 1 else 0.0
+        stats['hc_signal_strength'] = (hc_max > 0).sum().item() / num_tokens * 100
+
+    # Selection entropy (how spread out are the selections)
+    if routing_weights is not None:
+        # Compute entropy of routing weights
+        eps = 1e-10
+        entropy = -(routing_weights * torch.log(routing_weights + eps)).sum(dim=-1)
+        stats['selection_entropy'] = entropy.mean().item()
+
+        # Expert activation ratio (what fraction of experts ever get used)
+        ever_selected = (routing_weights > 0.01).any(dim=0)
+        stats['expert_activation_ratio'] = ever_selected.sum().item() / routing_weights.shape[-1]
+
+    return stats
 
 
-def compare_hc_bh(
+# =============================================================================
+# COMPARISON HELPER
+# =============================================================================
+
+def compare_hc_vs_bh(
     router_logits: torch.Tensor,
-    hc_beta: float = 0.5,
-    bh_alpha: float = 0.30,
-    max_k: int = 16,
-    kde_models: Optional[Dict] = None
+    layer_idx: int = 0,
+    kde_models: Optional[Dict] = None,
+    alpha: float = 0.6,
+    min_k: int = 1,
+    max_k: int = 16
 ) -> Dict[str, Any]:
     """
-    Compare HC and BH routing on the same input.
+    Compare HC and BH routing on same input.
+
+    Useful for debugging and understanding when HC outperforms BH.
 
     Args:
-        router_logits: Router logits
-        hc_beta: Beta parameter for HC
-        bh_alpha: Alpha parameter for BH
-        max_k: Maximum experts for both
+        router_logits: [num_tokens, num_experts]
+        layer_idx: Which layer
         kde_models: Pre-loaded KDE models
+        alpha: BH alpha parameter
+        min_k, max_k: Expert count constraints
 
     Returns:
-        Dict with comparison results:
-        - hc_counts, bh_counts: Expert count tensors
-        - hc_avg, bh_avg: Average experts
-        - hc_weights, bh_weights: Routing weight tensors
-        - agreement: Fraction of tokens with same count
+        Dict with 'hc_counts', 'bh_counts', 'hc_selected', 'bh_selected',
+        'hc_wins', 'bh_wins', 'ties'
     """
     from bh_routing import benjamini_hochberg_routing
 
@@ -459,129 +497,28 @@ def compare_hc_bh(
         kde_models = load_kde_models()
 
     # Run HC
-    hc_weights, hc_experts, hc_counts = higher_criticism_routing(
-        router_logits, beta=hc_beta, max_k=max_k, kde_models=kde_models
+    _, hc_selected, hc_counts, _ = higher_criticism_routing(
+        router_logits, min_k=min_k, max_k=max_k,
+        layer_idx=layer_idx, kde_models=kde_models
     )
 
     # Run BH
-    bh_weights, bh_experts, bh_counts = benjamini_hochberg_routing(
-        router_logits, alpha=bh_alpha, max_k=max_k, kde_models=kde_models
+    _, bh_selected, bh_counts = benjamini_hochberg_routing(
+        router_logits, alpha=alpha, min_k=min_k, max_k=max_k,
+        layer_idx=layer_idx, kde_models=kde_models
     )
 
-    # Compute comparison metrics
-    hc_counts_flat = hc_counts.flatten().float()
-    bh_counts_flat = bh_counts.flatten().float()
-
-    agreement = (hc_counts.flatten() == bh_counts.flatten()).float().mean().item()
+    # Compare
+    hc_c = hc_counts.float()
+    bh_c = bh_counts.float()
 
     return {
         'hc_counts': hc_counts,
         'bh_counts': bh_counts,
-        'hc_avg': hc_counts_flat.mean().item(),
-        'bh_avg': bh_counts_flat.mean().item(),
-        'hc_std': hc_counts_flat.std().item(),
-        'bh_std': bh_counts_flat.std().item(),
-        'hc_weights': hc_weights,
-        'bh_weights': bh_weights,
-        'agreement': agreement,
-        'hc_beta': hc_beta,
-        'bh_alpha': bh_alpha,
+        'hc_avg': hc_c.mean().item(),
+        'bh_avg': bh_c.mean().item(),
+        'hc_wins': (hc_c > bh_c).sum().item(),
+        'bh_wins': (bh_c > hc_c).sum().item(),
+        'ties': (hc_c == bh_c).sum().item(),
+        'hc_more_experts': (hc_c > bh_c).float().mean().item() * 100,
     }
-
-
-def compare_multi_beta_statistics(
-    results: Dict[float, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-):
-    """
-    Generate comparison statistics for different beta values.
-
-    Args:
-        results: Output from run_hc_multi_beta()
-
-    Returns:
-        DataFrame with columns: beta, mean_experts, std_experts, etc.
-    """
-    try:
-        import pandas as pd
-    except ImportError:
-        raise ImportError("pandas required. Install with: pip install pandas")
-
-    rows = []
-    for beta, (weights, experts, counts) in results.items():
-        counts_flat = counts.flatten().float()
-        max_k = experts.shape[-1]
-
-        rows.append({
-            'beta': beta,
-            'mean_experts': counts_flat.mean().item(),
-            'std_experts': counts_flat.std().item(),
-            'min_experts': counts_flat.min().item(),
-            'max_experts': counts_flat.max().item(),
-            'pct_at_ceiling': (counts_flat == max_k).float().mean().item() * 100,
-            'pct_at_floor': (counts_flat == 1).float().mean().item() * 100,
-        })
-
-    return pd.DataFrame(rows)
-
-
-# =============================================================================
-# Main Demo
-# =============================================================================
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("HIGHER CRITICISM ROUTING DEMONSTRATION")
-    print("=" * 70)
-
-    torch.manual_seed(42)
-
-    # Create sample input
-    batch_size, seq_len, num_experts = 2, 4, 64
-    router_logits = torch.randn(batch_size, seq_len, num_experts)
-
-    print(f"\nInput shape: {router_logits.shape}")
-    print(f"Testing with beta=0.5, max_k=8\n")
-
-    # Run HC routing
-    weights, experts, counts, stats = higher_criticism_routing(
-        router_logits,
-        beta=0.5,
-        max_k=8,
-        return_stats=True
-    )
-
-    print(f"Output shapes:")
-    print(f"  routing_weights: {weights.shape}")
-    print(f"  selected_experts: {experts.shape}")
-    print(f"  expert_counts: {counts.shape}")
-
-    print(f"\nExpert counts per token:")
-    print(counts)
-
-    print(f"\nWeight sums (should all be ~1.0):")
-    print(weights.sum(dim=-1))
-
-    print(f"\nRouting statistics:")
-    routing_stats = compute_routing_statistics(weights, counts)
-    for key, value in routing_stats.items():
-        print(f"  {key}: {value:.4f}")
-
-    # Compare with BH
-    print(f"\n" + "=" * 70)
-    print("COMPARISON: HC vs BH")
-    print("=" * 70)
-
-    comparison = compare_hc_bh(router_logits, hc_beta=0.5, bh_alpha=0.30, max_k=8)
-
-    print(f"\nHC (β=0.5): avg={comparison['hc_avg']:.2f}, std={comparison['hc_std']:.2f}")
-    print(f"BH (α=0.30): avg={comparison['bh_avg']:.2f}, std={comparison['bh_std']:.2f}")
-    print(f"Agreement: {comparison['agreement']*100:.1f}% of tokens have same count")
-
-    # Multi-beta comparison
-    print(f"\n" + "=" * 70)
-    print("MULTI-BETA COMPARISON")
-    print("=" * 70)
-
-    multi_results = run_hc_multi_beta(router_logits, max_k=8)
-    comparison_df = compare_multi_beta_statistics(multi_results)
-    print("\n" + comparison_df.to_string(index=False))
