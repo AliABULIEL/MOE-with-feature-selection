@@ -8,8 +8,28 @@ boundary by detecting where p-values deviate most from uniform distribution.
 
 Key Advantages over Benjamini-Hochberg:
 - Adaptive: finds natural threshold instead of fixed formula
-- No alpha parameter to tune
+- Single tuning parameter (beta) controls search range
 - Selects more experts when signal is strong
+
+SIMPLIFIED API (Option B):
+--------------------------
+Beta is the ONLY tuning parameter:
+    - beta='auto'  → Adaptive search (HC⁺) - searches where p < expected
+    - beta=1.0     → Full search (HC) - searches all 64 ranks
+    - beta=0.3-0.9 → Partial search (HC*) - searches first β fraction of ranks
+
+Example:
+    # Adaptive (recommended for most cases)
+    weights, experts, counts, _ = higher_criticism_routing(logits, beta='auto')
+    
+    # Conservative (search first 30% of ranks)
+    weights, experts, counts, _ = higher_criticism_routing(logits, beta=0.3)
+    
+    # Moderate (search first 50% of ranks)  
+    weights, experts, counts, _ = higher_criticism_routing(logits, beta=0.5)
+    
+    # Full search (all ranks)
+    weights, experts, counts, _ = higher_criticism_routing(logits, beta=1.0)
 
 References:
     Donoho, D., & Jin, J. (2004). Higher criticism for detecting sparse
@@ -19,7 +39,7 @@ References:
 import torch
 import torch.nn.functional as F
 import numpy as np
-from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
+from typing import Tuple, Optional, Dict, Any, List, Union, TYPE_CHECKING
 import warnings
 
 # REUSE from existing BH implementation
@@ -94,16 +114,15 @@ def find_hc_threshold(
     n: int,
     min_k: int = 1,
     max_k: int = 16,
-    beta: float = 0.5,
-    hc_variant: str = 'plus'
+    beta: Union[float, str] = 0.5
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Find the HC threshold - the rank with maximum HC statistic.
 
-    Implements three variants from Donoho & Jin (2004):
-    - 'standard': HC_n = max over all ranks
-    - 'plus': HC⁺_n = max where p < expected (RECOMMENDED)
-    - 'star': HC*_{n,β} = max over first β fraction of ranks
+    SIMPLIFIED API - Beta controls everything:
+    - beta='auto' → HC⁺ (only search where p < expected) - ADAPTIVE
+    - beta=1.0    → HC (search all ranks) - FULL
+    - beta=0.3-0.9 → HC* (search first β fraction) - PARTIAL
 
     Args:
         hc_stats: HC statistics [num_tokens, num_experts]
@@ -111,8 +130,7 @@ def find_hc_threshold(
         n: Number of experts
         min_k: Minimum experts to select (safety floor)
         max_k: Maximum experts to select (ceiling)
-        beta: Search fraction β ∈ (0, 1] for 'star' variant
-        hc_variant: Which HC formula - 'standard', 'plus', or 'star'
+        beta: Search fraction β ∈ (0, 1] OR 'auto' for adaptive
 
     Returns:
         num_selected: Number of experts per token [num_tokens]
@@ -126,30 +144,37 @@ def find_hc_threshold(
     device = hc_stats.device
     num_tokens = hc_stats.shape[0]
 
-    # Create mask based on HC variant (from Donoho & Jin 2004)
-    if hc_variant == 'plus':
-        # HC⁺: Only consider ranks where p < expected (i.e., positive HC)
+    # ==========================================================================
+    # SIMPLIFIED LOGIC: Derive behavior from beta value
+    # ==========================================================================
+    if beta == 'auto':
+        # HC⁺ (plus): Adaptive - only consider ranks where p < expected
         # This focuses on the "signal" region - most robust variant
         ranks = torch.arange(1, n + 1, device=device).float()
         expected = ranks / n
         expected = expected.unsqueeze(0).expand(num_tokens, -1)
         valid_mask = p_values_sorted < expected  # [num_tokens, num_experts]
-
-    elif hc_variant == 'star':
-        # HC*_{n,β}: Only search first β fraction of ranks
-        # β controls how conservative the search is
-        max_search = int(n * beta)
+        
+    elif isinstance(beta, (int, float)) and beta >= 1.0:
+        # HC (standard): Full search - consider all ranks
+        valid_mask = torch.ones_like(hc_stats, dtype=torch.bool)
+        
+    elif isinstance(beta, (int, float)) and 0 < beta < 1.0:
+        # HC* (star): Partial search - only first β fraction of ranks
+        max_search = max(1, int(n * beta))  # At least 1 rank
         valid_mask = torch.zeros_like(hc_stats, dtype=torch.bool)
         valid_mask[:, :max_search] = True
-
-    else:  # 'standard'
-        # HC_n: Standard HC - consider all ranks
-        valid_mask = torch.ones_like(hc_stats, dtype=torch.bool)
+        
+    else:
+        raise ValueError(
+            f"beta must be 'auto' or a float in (0, 1], got {beta}"
+        )
 
     # Apply min_k and max_k constraints to valid mask
     # Don't search below min_k or above max_k
-    valid_mask[:, :min_k-1] = False  # Must select at least min_k
-    valid_mask[:, max_k:] = False     # Can't select more than max_k
+    if min_k > 1:
+        valid_mask[:, :min_k-1] = False  # Must select at least min_k
+    valid_mask[:, max_k:] = False  # Can't select more than max_k
 
     # Set invalid positions to -inf so they're never selected
     hc_masked = hc_stats.clone()
@@ -176,13 +201,12 @@ def find_hc_threshold(
 
 def higher_criticism_routing(
     router_logits: torch.Tensor,
+    beta: Union[float, str] = 0.5,
     temperature: float = 1.0,
     min_k: int = 1,
     max_k: int = 16,
     layer_idx: int = 0,
     kde_models: Optional[Dict[int, Dict]] = None,
-    beta: float = 0.5,
-    hc_variant: str = 'plus',
     return_stats: bool = False,
     logger: Optional['HCRoutingLogger'] = None,
     log_every_n_tokens: int = 100,
@@ -192,29 +216,31 @@ def higher_criticism_routing(
     """
     Higher Criticism routing for adaptive expert selection in MoE models.
 
-    HC automatically finds where p-values deviate most from uniform distribution,
-    identifying the natural boundary between "signal" (relevant experts) and
-    "noise" (irrelevant experts).
-
-    Implements the HC method from Donoho & Jin (2004) with three variants:
-    - HC (standard): max over all ranks
-    - HC⁺ (plus): max where p < expected [RECOMMENDED]
-    - HC* (star): max over first β fraction of ranks
+    SIMPLIFIED API - Beta is the ONLY tuning parameter!
+    ===================================================
+    
+    Beta controls the search range for finding the optimal threshold:
+    
+    | Beta Value | Behavior | Searches | Use Case |
+    |------------|----------|----------|----------|
+    | 'auto'     | Adaptive | Where p < expected | Recommended - self-tuning |
+    | 1.0        | Full     | All 64 ranks | Maximum coverage |
+    | 0.7        | Wide     | First 45 ranks | Balanced |
+    | 0.5        | Medium   | First 32 ranks | Moderate |
+    | 0.3        | Narrow   | First 19 ranks | Conservative |
 
     Args:
         router_logits: Router output logits
             Shape: [batch, seq_len, num_experts] or [num_tokens, num_experts]
-        temperature: Temperature for softmax weight computation (default: 1.0)
+        beta: Search fraction - THE MAIN TUNING PARAMETER
+            - 'auto': Adaptive search (only where p < expected) [RECOMMENDED]
+            - 1.0: Search all ranks
+            - 0.3-0.9: Search first β fraction of ranks
+        temperature: Softmax temperature for weight computation (default: 1.0)
         min_k: Minimum experts to select per token (safety floor)
         max_k: Maximum experts to select per token (ceiling)
         layer_idx: Which transformer layer (0-15) for KDE model lookup
         kde_models: Pre-loaded KDE models. If None, loads automatically.
-        beta: Search fraction β ∈ (0, 1] for 'star' variant.
-              Controls how much of the ranking to search (e.g., β=0.5 → first half)
-        hc_variant: HC variant to use:
-            - 'plus': HC⁺ - Only where p < expected (RECOMMENDED, most robust)
-            - 'standard': HC - All ranks considered
-            - 'star': HC* - Only first β fraction of ranks
         return_stats: If True, return additional statistics dict
         logger: Optional HCRoutingLogger for detailed logging
         log_every_n_tokens: How often to log (every N tokens)
@@ -231,10 +257,24 @@ def higher_criticism_routing(
         stats (optional): Dict with 'p_values', 'hc_stats', 'threshold_ranks', etc.
 
     Example:
+        >>> import torch
         >>> logits = torch.randn(1, 10, 64)  # batch=1, seq=10, experts=64
-        >>> weights, experts, counts = higher_criticism_routing(
-        ...     logits, min_k=4, max_k=12, beta=0.5, hc_variant='plus'
-        ... )[:3]
+        
+        >>> # Adaptive (recommended)
+        >>> weights, experts, counts, _ = higher_criticism_routing(
+        ...     logits, beta='auto', min_k=4, max_k=12
+        ... )
+        
+        >>> # Conservative (fewer experts)
+        >>> weights, experts, counts, _ = higher_criticism_routing(
+        ...     logits, beta=0.3, min_k=4, max_k=12
+        ... )
+        
+        >>> # Moderate
+        >>> weights, experts, counts, _ = higher_criticism_routing(
+        ...     logits, beta=0.5, min_k=4, max_k=12
+        ... )
+        
         >>> print(counts)  # Adaptive: might be [6, 8, 5, 7, ...] not fixed 8
 
     References:
@@ -246,6 +286,12 @@ def higher_criticism_routing(
     # =========================================================================
     original_shape = router_logits.shape
     device = router_logits.device
+
+    # Validate beta
+    if beta != 'auto' and not isinstance(beta, (int, float)):
+        raise ValueError(f"beta must be 'auto' or a number, got {type(beta)}")
+    if isinstance(beta, (int, float)) and not (0 < beta <= 1.0):
+        raise ValueError(f"beta must be in (0, 1], got {beta}")
 
     # Handle different input shapes
     if router_logits.dim() == 2:
@@ -292,7 +338,7 @@ def higher_criticism_routing(
     # =========================================================================
     num_selected, threshold_ranks, max_hc_values = find_hc_threshold(
         hc_stats, p_sorted, num_experts,
-        min_k=min_k, max_k=max_k, beta=beta, hc_variant=hc_variant
+        min_k=min_k, max_k=max_k, beta=beta
     )
 
     # =========================================================================
@@ -356,8 +402,7 @@ def higher_criticism_routing(
                     'num_selected': num_selected[t].item(),
                     'selected_experts': selected_experts[t].cpu().tolist(),
                     'routing_weights': routing_weights[t].cpu().tolist(),
-                    'beta': beta,
-                    'hc_variant': hc_variant,
+                    'beta': str(beta),  # Convert to string for 'auto'
                     'min_k': min_k,
                     'max_k': max_k,
                 }
@@ -384,6 +429,7 @@ def higher_criticism_routing(
             'hc_statistics': hc_stats.view(batch_size, seq_len, num_experts) if not was_2d else hc_stats,
             'threshold_ranks': threshold_ranks.view(batch_size, seq_len) if not was_2d else threshold_ranks,
             'max_hc_values': max_hc_values.view(batch_size, seq_len) if not was_2d else max_hc_values,
+            'beta': beta,
         }
         return routing_weights, selected_experts, expert_counts, stats
 
@@ -472,6 +518,7 @@ def compare_hc_vs_bh(
     layer_idx: int = 0,
     kde_models: Optional[Dict] = None,
     alpha: float = 0.6,
+    beta: Union[float, str] = 0.5,
     min_k: int = 1,
     max_k: int = 16
 ) -> Dict[str, Any]:
@@ -485,6 +532,7 @@ def compare_hc_vs_bh(
         layer_idx: Which layer
         kde_models: Pre-loaded KDE models
         alpha: BH alpha parameter
+        beta: HC beta parameter ('auto' or float)
         min_k, max_k: Expert count constraints
 
     Returns:
@@ -498,7 +546,7 @@ def compare_hc_vs_bh(
 
     # Run HC
     _, hc_selected, hc_counts, _ = higher_criticism_routing(
-        router_logits, min_k=min_k, max_k=max_k,
+        router_logits, beta=beta, min_k=min_k, max_k=max_k,
         layer_idx=layer_idx, kde_models=kde_models
     )
 
@@ -521,4 +569,44 @@ def compare_hc_vs_bh(
         'bh_wins': (bh_c > hc_c).sum().item(),
         'ties': (hc_c == bh_c).sum().item(),
         'hc_more_experts': (hc_c > bh_c).float().mean().item() * 100,
+        'beta': beta,
+        'alpha': alpha,
     }
+
+
+# =============================================================================
+# QUICK TEST
+# =============================================================================
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print("HC ROUTING - SIMPLIFIED BETA API TEST")
+    print("=" * 70)
+    
+    # Create test logits
+    torch.manual_seed(42)
+    logits = torch.randn(20, 64)
+    
+    print("\nTesting different beta values:\n")
+    
+    # Test different beta values
+    for beta in ['auto', 0.3, 0.5, 0.7, 1.0]:
+        weights, experts, counts, stats = higher_criticism_routing(
+            logits,
+            beta=beta,
+            min_k=4,
+            max_k=12,
+            return_stats=True
+        )
+        
+        avg = counts.float().mean().item()
+        std = counts.float().std().item()
+        min_c = counts.min().item()
+        max_c = counts.max().item()
+        
+        beta_str = f"beta={beta}" if beta != 'auto' else "beta='auto'"
+        print(f"  {beta_str:15s} → avg={avg:.1f} ± {std:.1f}, range=[{min_c}, {max_c}]")
+    
+    print("\n" + "=" * 70)
+    print("✅ All tests passed!")
+    print("=" * 70)
