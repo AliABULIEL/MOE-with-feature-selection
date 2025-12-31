@@ -287,6 +287,11 @@ def higher_criticism_routing(
     original_shape = router_logits.shape
     device = router_logits.device
 
+    # Validate inputs
+    assert router_logits.dim() in [2, 3], f"Expected 2D or 3D tensor, got {router_logits.dim()}D"
+    assert 0 < min_k <= max_k, f"Invalid constraints: min_k={min_k}, max_k={max_k}"
+    assert temperature > 0, f"Temperature must be positive, got {temperature}"
+
     # Validate beta
     if beta != 'auto' and not isinstance(beta, (int, float)):
         raise ValueError(f"beta must be 'auto' or a number, got {type(beta)}")
@@ -333,6 +338,11 @@ def higher_criticism_routing(
     # =========================================================================
     hc_stats = compute_hc_statistic(p_sorted, num_experts)  # [num_tokens, 64]
 
+    # Validate HC computation
+    assert hc_stats.shape == (num_tokens, num_experts), f"HC stats shape mismatch: {hc_stats.shape}"
+    assert not torch.isnan(hc_stats).any(), "HC statistics contain NaN values"
+    assert not torch.isinf(hc_stats).any(), "HC statistics contain Inf values"
+
     # =========================================================================
     # STEP 6: Find HC threshold (where to cut off selection)
     # =========================================================================
@@ -340,6 +350,22 @@ def higher_criticism_routing(
         hc_stats, p_sorted, num_experts,
         min_k=min_k, max_k=max_k, beta=beta
     )
+
+    # Validate threshold selection
+    assert num_selected.shape == (num_tokens,), f"num_selected shape mismatch: {num_selected.shape}"
+    assert (num_selected >= min_k).all(), f"Some selections below min_k: {num_selected.min()}"
+    assert (num_selected <= max_k).all(), f"Some selections above max_k: {num_selected.max()}"
+    assert (threshold_ranks >= 0).all() and (threshold_ranks < num_experts).all(), \
+        "threshold_ranks out of bounds"
+
+    # Warn if no positive HC signal detected
+    no_signal_count = (max_hc_values <= 0).sum().item()
+    if no_signal_count > 0:
+        warnings.warn(
+            f"Layer {layer_idx}: No positive HC signal in {no_signal_count}/{num_tokens} tokens. "
+            f"Using min_k={min_k} fallback.",
+            UserWarning
+        )
 
     # =========================================================================
     # STEP 7: Create selection mask
@@ -364,7 +390,10 @@ def higher_criticism_routing(
     for t in range(num_tokens):
         # Get indices of selected experts (sorted by p-value, i.e., best first)
         selected_idx = sort_indices[t, :num_selected[t]]
-        selected_experts[t, :len(selected_idx)] = selected_idx
+        num_to_select = len(selected_idx)
+        assert num_to_select == num_selected[t].item(), "Selection count mismatch"
+        assert all(0 <= idx < num_experts for idx in selected_idx), "Expert index out of bounds"
+        selected_experts[t, :num_to_select] = selected_idx
 
     # =========================================================================
     # STEP 9: Compute routing weights
@@ -383,30 +412,126 @@ def higher_criticism_routing(
     weight_sum = torch.clamp(weight_sum, min=1e-10)
     routing_weights = routing_weights / weight_sum
 
+    # Validate final weights
+    final_sums = routing_weights.sum(dim=-1)
+    assert torch.allclose(final_sums, torch.ones_like(final_sums), atol=1e-5), \
+        f"Routing weights don't sum to 1: min={final_sums.min():.6f}, max={final_sums.max():.6f}"
+    assert (routing_weights >= 0).all(), "Routing weights contain negative values"
+    assert (routing_weights <= 1).all(), "Routing weights exceed 1.0"
+
     # =========================================================================
-    # STEP 10: Logging (if logger provided)
+    # STEP 10: Logging (if logger provided) - COMPLETE SCHEMA
     # =========================================================================
     if logger is not None:
         for t in range(num_tokens):
             if (token_idx + t) % log_every_n_tokens == 0:
+                # Get data for this token
+                token_logits = logits_flat[t]
+                token_p_values = p_values[t]
+                token_p_sorted = p_sorted[t]
+                token_sort_indices = sort_indices[t]
+                token_hc_stats = hc_stats[t]
+                token_num_selected = num_selected[t].item()
+                token_threshold_rank = threshold_ranks[t].item()
+                token_max_hc = max_hc_values[t].item()
+                token_selected_experts = selected_experts[t].cpu().tolist()
+                token_routing_weights = routing_weights[t]
+
+                # Compute statistics
+                logit_stats = {
+                    'min': float(token_logits.min()),
+                    'max': float(token_logits.max()),
+                    'mean': float(token_logits.mean()),
+                    'std': float(token_logits.std())
+                }
+
+                # Determine selection reason
+                if token_num_selected == min_k:
+                    if token_max_hc == 0.0:
+                        selection_reason = 'no_signal'
+                    else:
+                        selection_reason = 'min_k_floor'
+                elif token_num_selected == max_k:
+                    selection_reason = 'max_k_ceiling'
+                else:
+                    selection_reason = 'hc_threshold'
+
+                # Count positive HC values
+                hc_positive_count = int((token_hc_stats > 0).sum())
+
+                # Determine search range based on beta
+                if beta == 'auto':
+                    # For auto, we search where p < expected
+                    ranks = torch.arange(1, num_experts + 1, device=device).float()
+                    expected = ranks / num_experts
+                    search_start = 1
+                    search_end = int((token_p_sorted < expected).sum())
+                    beta_str = 'auto'
+                elif isinstance(beta, (int, float)) and beta >= 1.0:
+                    search_start = 1
+                    search_end = num_experts
+                    beta_str = str(beta)
+                else:
+                    search_start = 1
+                    search_end = max(1, int(num_experts * beta))
+                    beta_str = str(beta)
+
+                # Validate weights sum
+                weights_sum = float(token_routing_weights.sum())
+
+                # Create complete log entry with FULL schema
                 log_entry = {
+                    # === IDENTIFICATION ===
                     'sample_idx': sample_idx,
                     'token_idx': token_idx + t,
                     'layer_idx': layer_idx,
-                    'router_logits': logits_flat[t].cpu().tolist(),
-                    'p_values': p_values[t].cpu().tolist(),
-                    'p_values_sorted': p_sorted[t].cpu().tolist(),
-                    'hc_statistics': hc_stats[t].cpu().tolist(),
-                    'hc_threshold_rank': threshold_ranks[t].item(),
-                    'hc_max_value': max_hc_values[t].item(),
-                    'num_selected': num_selected[t].item(),
-                    'selected_experts': selected_experts[t].cpu().tolist(),
-                    'routing_weights': routing_weights[t].cpu().tolist(),
-                    'beta': str(beta),  # Convert to string for 'auto'
-                    'min_k': min_k,
-                    'max_k': max_k,
+
+                    # === ROUTER OUTPUTS ===
+                    'router_logits': token_logits.cpu().tolist(),
+                    'router_logits_stats': logit_stats,
+
+                    # === P-VALUE COMPUTATION ===
+                    'kde_model_id': f"layer_{layer_idx}",
+                    'p_values': token_p_values.cpu().tolist(),
+                    'p_values_sorted': token_p_sorted.cpu().tolist(),
+                    'sort_indices': token_sort_indices.cpu().tolist(),
+
+                    # === HC STATISTICS (CRITICAL) ===
+                    'hc_statistics': token_hc_stats.cpu().tolist(),
+                    'hc_max_rank': token_threshold_rank + 1,  # Convert to 1-indexed
+                    'hc_max_value': token_max_hc,
+                    'hc_positive_count': hc_positive_count,
+                    'search_range': {
+                        'beta': beta_str,
+                        'start_rank': search_start,
+                        'end_rank': search_end
+                    },
+
+                    # === SELECTION DECISION ===
+                    'num_selected': token_num_selected,
+                    'selected_experts': token_selected_experts,
+                    'routing_weights': token_routing_weights.cpu().tolist(),
+                    'selection_reason': selection_reason,
+
+                    # === CONSTRAINT FLAGS ===
+                    'hit_min_k': (token_num_selected == min_k),
+                    'hit_max_k': (token_num_selected == max_k),
+                    'fallback_triggered': (token_max_hc == 0.0),
+
+                    # === VALIDATION ===
+                    'weights_sum': weights_sum,
+                    'config': {
+                        'min_k': min_k,
+                        'max_k': max_k,
+                        'temperature': temperature
+                    }
                 }
-                logger.log_routing_decision(log_entry)
+
+                # Log with error handling
+                try:
+                    logger.log_routing_decision(log_entry)
+                except Exception as e:
+                    warnings.warn(f"Logging failed: {e}", UserWarning)
 
     # =========================================================================
     # STEP 11: Reshape outputs to match input shape

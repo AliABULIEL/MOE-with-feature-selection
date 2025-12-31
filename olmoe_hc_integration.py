@@ -22,10 +22,11 @@ References:
 
 import torch
 import torch.nn.functional as F
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Union
 from collections import defaultdict
 
-from hc_routing import higher_criticism_routing, load_kde_models
+from hc_routing import higher_criticism_routing
+from bh_routing import load_kde_models
 from hc_routing_logging import HCRoutingLogger
 
 
@@ -63,8 +64,7 @@ class HCRoutingIntegration:
         self,
         min_k: int = 1,
         max_k: int = 16,
-        beta: float = 0.5,
-        hc_variant: str = 'plus',
+        beta: Union[float, str] = 0.5,
         temperature: float = 1.0,
         logger: Optional[HCRoutingLogger] = None,
         log_every_n: int = 100,
@@ -73,14 +73,18 @@ class HCRoutingIntegration:
         """
         Patch model to use HC routing (Donoho & Jin 2004).
 
+        SIMPLIFIED API - Beta controls everything:
+        - beta='auto'  → HC⁺ (adaptive search) - RECOMMENDED
+        - beta=1.0     → HC (full search) - all ranks
+        - beta=0.3-0.9 → HC* (partial search) - first β fraction
+
         Args:
             min_k: Minimum experts per token (safety floor)
             max_k: Maximum experts per token (ceiling)
-            beta: Search fraction β ∈ (0, 1] for 'star' variant
-            hc_variant: HC variant to use:
-                - 'plus': HC⁺ - Only where p < expected (RECOMMENDED)
-                - 'standard': HC - All ranks considered
-                - 'star': HC* - Only first β fraction of ranks
+            beta: THE MAIN TUNING PARAMETER
+                - 'auto': Adaptive search (only where p < expected) [RECOMMENDED]
+                - 1.0: Search all ranks
+                - 0.3-0.9: Search first β fraction of ranks
             temperature: Softmax temperature for weight computation
             logger: Optional logger for detailed logging
             log_every_n: Logging frequency (every N tokens)
@@ -95,10 +99,16 @@ class HCRoutingIntegration:
         if not kde_models:
             print("⚠️ Warning: KDE models not found. Using empirical p-values.")
 
-        # Token counter for logging
+        # Token counter and sample tracking for logging
         self._token_counter = 0
+        self._sample_counter = 0
         self._logger = logger
         self._collect_stats = collect_stats
+
+        # Store config for assertions
+        self._min_k = min_k
+        self._max_k = max_k
+        self._beta = beta
 
         def create_hc_forward(layer_name: str, original_block):
             """Create HC-enabled forward function for a specific layer."""
@@ -137,16 +147,16 @@ class HCRoutingIntegration:
                 # Apply HC routing
                 routing_weights, selected_experts, expert_counts, stats = higher_criticism_routing(
                     router_logits,
+                    beta=beta,
                     temperature=temperature,
                     min_k=min_k,
                     max_k=max_k,
                     layer_idx=layer_idx,
                     kde_models=kde_models,
-                    beta=beta,
-                    hc_variant=hc_variant,
                     return_stats=True,
                     logger=self._logger,
                     log_every_n_tokens=log_every_n,
+                    sample_idx=self._sample_counter,
                     token_idx=self._token_counter
                 )
 
@@ -196,8 +206,13 @@ class HCRoutingIntegration:
             block.forward = create_hc_forward(name, block)
 
         self.is_patched = True
+
+        # Verify patching worked
+        assert self.is_patched, "Patching failed silently"
+        assert len(self.moe_blocks) == 16, f"Expected 16 MoE blocks, found {len(self.moe_blocks)}"
+
         print(f"✅ Patched {len(self.moe_blocks)} MoE blocks with HC routing")
-        print(f"   Config: min_k={min_k}, max_k={max_k}, β={beta}, variant={hc_variant}")
+        print(f"   Config: min_k={min_k}, max_k={max_k}, β={beta}")
 
     def unpatch_model(self):
         """Restore original routing."""
@@ -212,6 +227,7 @@ class HCRoutingIntegration:
         self.original_forwards.clear()
         self.is_patched = False
         self._token_counter = 0
+        self._sample_counter = 0
         print("✅ Restored original routing")
 
     def get_stats_summary(self) -> Dict[str, Any]:
@@ -232,4 +248,10 @@ class HCRoutingIntegration:
     def clear_stats(self):
         """Clear collected statistics."""
         self.stats.clear()
+        self._token_counter = 0
+        self._sample_counter = 0
+
+    def start_sample(self):
+        """Call this before processing each new sample for proper logging."""
+        self._sample_counter += 1
         self._token_counter = 0

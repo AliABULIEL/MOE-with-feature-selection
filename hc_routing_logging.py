@@ -79,55 +79,80 @@ class HCRoutingLogger:
 
     def log_routing_decision(self, log_entry: Dict[str, Any]):
         """
-        Log a single routing decision.
+        Log a single routing decision with complete HC schema.
 
         Args:
-            log_entry: Dict containing:
-                Required:
-                - sample_idx: int
-                - token_idx: int
-                - layer_idx: int
+            log_entry: Dict containing COMPLETE HC routing information:
+                === IDENTIFICATION ===
+                - sample_idx, token_idx, layer_idx: int
+
+                === ROUTER OUTPUTS ===
+                - router_logits: List[float] - raw logits [64]
+                - router_logits_stats: Dict[str, float] - min/max/mean/std
+
+                === P-VALUE COMPUTATION ===
+                - kde_model_id: str - layer identifier
+                - p_values: List[float] - p-values [64]
+                - p_values_sorted: List[float] - sorted ascending
+                - sort_indices: List[int] - mapping to original indices
+
+                === HC STATISTICS (CRITICAL) ===
+                - hc_statistics: List[float] - HC(i) for all 64 ranks
+                - hc_max_rank: int - rank where HC peaks (1-indexed)
+                - hc_max_value: float - maximum HC value
+                - hc_positive_count: int - how many ranks have HC > 0
+                - search_range: Dict - beta, start_rank, end_rank
+
+                === SELECTION DECISION ===
                 - num_selected: int
                 - selected_experts: List[int]
-
-                HC-specific (Donoho & Jin 2004):
-                - hc_statistics: List[float] - HC at each rank
-                - hc_threshold_rank: int - rank where HC peaked
-                - hc_max_value: float - maximum HC value
-                - beta: float - search fraction parameter β ∈ (0, 1]
-                - hc_variant: str - 'standard', 'plus', or 'star'
-
-                Optional:
-                - router_logits: List[float]
-                - p_values: List[float]
                 - routing_weights: List[float]
-                - min_k: int
-                - max_k: int
+                - selection_reason: str
+
+                === CONSTRAINT FLAGS ===
+                - hit_min_k, hit_max_k, fallback_triggered: bool
+
+                === VALIDATION ===
+                - weights_sum: float
+                - config: Dict - min_k, max_k, temperature
         """
         self.total_decisions += 1
 
-        # Update layer statistics (always, even if not logging full entry)
+        # Extract key fields
         layer_idx = log_entry.get('layer_idx', 0)
         num_selected = log_entry.get('num_selected', 0)
-        min_k = log_entry.get('min_k', 1)
-        max_k = log_entry.get('max_k', 16)
+        config = log_entry.get('config', {})
+        min_k = config.get('min_k', 1)
+        max_k = config.get('max_k', 16)
 
+        # Update layer statistics (always, even if not logging full entry)
         layer_stats = self.layer_stats[layer_idx]
         layer_stats['num_selected'].append(num_selected)
         layer_stats['total'] += 1
 
-        if num_selected == min_k:
+        # Track floor/ceiling hits
+        if num_selected == min_k or log_entry.get('hit_min_k', False):
             layer_stats['floor_hits'] += 1
-        if num_selected == max_k:
+        if num_selected == max_k or log_entry.get('hit_max_k', False):
             layer_stats['ceiling_hits'] += 1
 
-        if 'hc_threshold_rank' in log_entry:
-            layer_stats['hc_threshold_rank'].append(log_entry['hc_threshold_rank'])
+        # Track HC-specific statistics
+        if 'hc_max_rank' in log_entry:
+            layer_stats['hc_threshold_rank'].append(log_entry['hc_max_rank'])
         if 'hc_max_value' in log_entry:
             layer_stats['hc_max_value'].append(log_entry['hc_max_value'])
 
         # Log full entry periodically
         if self.total_decisions % self.log_every_n == 0:
+            # Validate required fields before logging
+            required_fields = [
+                'sample_idx', 'token_idx', 'layer_idx', 'num_selected',
+                'hc_statistics', 'hc_max_rank', 'hc_max_value'
+            ]
+            missing = [f for f in required_fields if f not in log_entry]
+            if missing:
+                print(f"⚠️ Warning: Log entry missing fields: {missing}")
+
             self.routing_decisions.append(log_entry)
             self.logged_decisions += 1
 
