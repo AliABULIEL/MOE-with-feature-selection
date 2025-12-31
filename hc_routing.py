@@ -430,15 +430,14 @@ def higher_criticism_routing(
     # Zero out non-selected experts
     routing_weights = weights * selection_mask.float()
 
-    # Renormalize to sum to 1
-    weight_sum = routing_weights.sum(dim=-1, keepdim=True)
-    weight_sum = torch.clamp(weight_sum, min=1e-10)
-    routing_weights = routing_weights / weight_sum
+    # IMPORTANT: Do NOT renormalize!
+    # OLMoE expects sparse weights (sum < 1.0) with norm_topk_prob=False (default)
+    # Renormalization amplifies weights and breaks perplexity for k != 8
 
-    # Validate final weights
+    # Validate final weights (sum should be in (0, 1], not necessarily 1.0)
     final_sums = routing_weights.sum(dim=-1)
-    assert torch.allclose(final_sums, torch.ones_like(final_sums), atol=1e-5), \
-        f"Routing weights don't sum to 1: min={final_sums.min():.6f}, max={final_sums.max():.6f}"
+    assert (final_sums > 0).all() and (final_sums <= 1.0 + 1e-5).all(), \
+        f"Routing weights must be in (0, 1]: min={final_sums.min():.6f}, max={final_sums.max():.6f}"
     assert (routing_weights >= 0).all(), "Routing weights contain negative values"
     assert (routing_weights <= 1).all(), "Routing weights exceed 1.0"
 
