@@ -170,17 +170,22 @@ def find_hc_threshold(
             f"beta must be 'auto' or a float in (0, 1], got {beta}"
         )
 
-    # Apply min_k and max_k constraints to valid mask
-    # Don't search below min_k or above max_k
+    # CRITICAL FIX: Do NOT apply max_k to search range
+    # β defines search range independently of final selection constraints
+    # Only prevent searching below min_k (if min_k > 1)
     if min_k > 1:
         valid_mask[:, :min_k-1] = False  # Must select at least min_k
-    valid_mask[:, max_k:] = False  # Can't select more than max_k
+
+    # NOTE: Removed the line `valid_mask[:, max_k:] = False` which was
+    # incorrectly limiting the search range. This caused all β ≥ max_k/n
+    # to behave identically. max_k should only clamp the FINAL selection,
+    # not restrict where we search for the HC threshold.
 
     # Set invalid positions to -inf so they're never selected
     hc_masked = hc_stats.clone()
     hc_masked[~valid_mask] = float('-inf')
 
-    # Find maximum HC and its position
+    # Find maximum HC and its position (within β-defined search range)
     max_hc_values, threshold_ranks = torch.max(hc_masked, dim=1)
 
     # threshold_ranks is 0-indexed, so num_selected = threshold_ranks + 1
@@ -193,8 +198,26 @@ def find_hc_threshold(
     threshold_ranks[no_valid] = min_k - 1
     max_hc_values[no_valid] = 0.0
 
-    # Enforce constraints
+    # APPLY min_k/max_k constraints AFTER finding threshold
+    # This is the ONLY place where max_k should affect the result
+    num_selected_unclamped = num_selected.clone()  # Save for diagnostics
     num_selected = torch.clamp(num_selected, min=min_k, max=max_k)
+
+    # Diagnostic: warn if clamping occurs frequently
+    clamped_down = (num_selected_unclamped > max_k).sum().item()
+    clamped_up = (num_selected_unclamped < min_k).sum().item()
+    if clamped_down > num_tokens * 0.3:  # >30% tokens clamped down
+        warnings.warn(
+            f"{clamped_down}/{num_tokens} tokens had HC threshold > max_k={max_k}. "
+            f"Consider increasing max_k or using lower β.",
+            UserWarning
+        )
+    if clamped_up > num_tokens * 0.3:  # >30% tokens clamped up
+        warnings.warn(
+            f"{clamped_up}/{num_tokens} tokens had HC threshold < min_k={min_k}. "
+            f"Consider decreasing min_k or using higher β.",
+            UserWarning
+        )
 
     return num_selected, threshold_ranks, max_hc_values
 
