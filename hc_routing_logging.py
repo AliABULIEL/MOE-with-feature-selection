@@ -183,6 +183,7 @@ class HCRoutingLogger:
             json.dump(output, f, indent=2)
 
         print(f"✅ Saved HC routing logs to {filepath}")
+        return filepath
 
     def get_summary(self) -> Dict[str, Any]:
         """
