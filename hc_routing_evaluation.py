@@ -33,6 +33,9 @@ from typing import Dict, List, Optional, Any, Tuple
 from tqdm import tqdm
 import warnings
 
+# Import detailed logging system
+from hc_routing_logging import HCRoutingLogger
+
 warnings.filterwarnings('ignore')
 
 
@@ -153,7 +156,12 @@ def evaluate_perplexity(
     patcher=None,
     max_length: int = 512,
     batch_size: int = 1,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    # Detailed logging parameters
+    log_routing: bool = False,
+    output_dir: str = './logs',
+    experiment_name: str = 'eval_wikitext',
+    log_every_n: int = 5
 ) -> Dict[str, Any]:
     """
     Evaluate perplexity on WikiText-2 with optional internal routing logging.
@@ -184,8 +192,31 @@ def evaluate_perplexity(
     """
     model.eval()
     losses = []
+    token_counts = []  # Track tokens per sample for proper weighting
     total_tokens = 0
     internal_logs = [] if patcher else None
+
+    # Create detailed logger if requested
+    detailed_logger = None
+    if log_routing and output_dir and patcher:
+        detailed_logger = HCRoutingLogger(
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+            log_every_n=log_every_n
+        )
+        print(f"✅ Created HCRoutingLogger: {experiment_name}")
+        print(f"   Logging to: {output_dir}")
+        print(f"   Log frequency: every {log_every_n} tokens")
+
+        # Attach logger to integration
+        if hasattr(patcher, 'set_external_logger'):
+            patcher.set_external_logger(detailed_logger)
+        elif hasattr(patcher, '_logger'):
+            patcher._logger = detailed_logger
+            print("✅ Logger attached via _logger attribute")
+        else:
+            print("⚠️  Warning: Cannot attach logger to patcher")
+            detailed_logger = None
 
     # Clear any existing logs
     if patcher and hasattr(patcher, 'clear_internal_logs'):
@@ -218,9 +249,11 @@ def evaluate_perplexity(
             # Forward pass
             outputs = model(input_ids, labels=input_ids)
             loss = outputs.loss.item()
+            num_tokens = input_ids.shape[1]
 
             losses.append(loss)
-            total_tokens += input_ids.shape[1]
+            token_counts.append(num_tokens)
+            total_tokens += num_tokens
 
             # End logging for this sample
             if patcher and hasattr(patcher, 'end_sample_logging'):
@@ -230,17 +263,67 @@ def evaluate_perplexity(
     if patcher and hasattr(patcher, 'get_internal_logs'):
         internal_logs = patcher.get_internal_logs()
 
-    # Compute perplexity
-    avg_loss = float(np.mean(losses)) if losses else float('inf')
-    perplexity = float(np.exp(avg_loss))
+    # Save detailed logs if logger was created
+    if detailed_logger:
+        print("\n" + "="*70)
+        print("SAVING DETAILED ROUTING LOGS")
+        print("="*70)
+        detailed_logger.save_logs()
+        detailed_logger.generate_plots()
+        summary = detailed_logger.get_summary()
+        print(f"✅ Saved {detailed_logger.logged_decisions} detailed routing decisions")
+        print(f"   Total decisions: {detailed_logger.total_decisions}")
+        print(f"   Log directory: {detailed_logger.output_dir}")
+        if 'global' in summary:
+            print(f"   Avg experts: {summary['global']['avg_experts']:.2f}")
+            print(f"   Floor hit rate: {summary['global']['floor_hit_rate']:.1f}%")
+            print(f"   Ceiling hit rate: {summary['global']['ceiling_hit_rate']:.1f}%")
+        print("="*70)
+
+    # Compute perplexity (both token-weighted and sample-weighted)
+    if losses:
+        # CORRECT: Token-weighted average (standard practice in language modeling)
+        # Each sample contributes proportionally to its token count
+        total_weighted_loss = sum(loss * count for loss, count in zip(losses, token_counts))
+        avg_loss_token_weighted = total_weighted_loss / total_tokens
+        perplexity_token_weighted = float(np.exp(avg_loss_token_weighted))
+
+        # COMPARISON: Sample-weighted average (treats all samples equally)
+        # This is biased toward shorter sequences
+        avg_loss_sample_weighted = float(np.mean(losses))
+        perplexity_sample_weighted = float(np.exp(avg_loss_sample_weighted))
+
+        # Use token-weighted as primary metric
+        perplexity = perplexity_token_weighted
+        avg_loss = avg_loss_token_weighted
+    else:
+        perplexity = float('inf')
+        avg_loss = float('inf')
+        perplexity_token_weighted = float('inf')
+        perplexity_sample_weighted = float('inf')
+        avg_loss_token_weighted = float('inf')
+        avg_loss_sample_weighted = float('inf')
 
     return {
+        # Primary metrics (token-weighted - CORRECT)
         'perplexity': perplexity,
         'avg_loss': avg_loss,
+
+        # Token-weighted metrics (explicit)
+        'perplexity_token_weighted': perplexity_token_weighted,
+        'avg_loss_token_weighted': avg_loss_token_weighted,
+
+        # Sample-weighted metrics (for comparison)
+        'perplexity_sample_weighted': perplexity_sample_weighted,
+        'avg_loss_sample_weighted': avg_loss_sample_weighted,
+
+        # Raw data
         'losses': losses,
+        'token_counts': token_counts,
         'internal_logs': internal_logs,
         'num_samples': len(losses),
-        'total_tokens': total_tokens
+        'total_tokens': total_tokens,
+        'detailed_logger': detailed_logger
     }
 
 
@@ -250,7 +333,12 @@ def evaluate_lambada(
     dataset: List[Dict[str, str]],
     patcher=None,
     max_length: int = 512,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    # Detailed logging parameters
+    log_routing: bool = False,
+    output_dir: str = './logs',
+    experiment_name: str = 'eval_lambada',
+    log_every_n: int = 5
 ) -> Dict[str, Any]:
     """
     Evaluate accuracy on LAMBADA with optional internal routing logging.
@@ -280,6 +368,26 @@ def evaluate_lambada(
     total = 0
     predictions = []
     internal_logs = [] if patcher else None
+
+    # Create detailed logger if requested
+    detailed_logger = None
+    if log_routing and output_dir and patcher:
+        detailed_logger = HCRoutingLogger(
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+            log_every_n=log_every_n
+        )
+        print(f"✅ Created HCRoutingLogger: {experiment_name}")
+        print(f"   Logging to: {output_dir}")
+
+        # Attach logger to integration
+        if hasattr(patcher, 'set_external_logger'):
+            patcher.set_external_logger(detailed_logger)
+        elif hasattr(patcher, '_logger'):
+            patcher._logger = detailed_logger
+        else:
+            print("⚠️  Warning: Cannot attach logger to patcher")
+            detailed_logger = None
 
     # Clear any existing logs
     if patcher and hasattr(patcher, 'clear_internal_logs'):
@@ -342,6 +450,21 @@ def evaluate_lambada(
     if patcher and hasattr(patcher, 'get_internal_logs'):
         internal_logs = patcher.get_internal_logs()
 
+    # Save detailed logs if logger was created
+    if detailed_logger:
+        print("\n" + "="*70)
+        print("SAVING DETAILED ROUTING LOGS")
+        print("="*70)
+        detailed_logger.save_logs()
+        detailed_logger.generate_plots()
+        summary = detailed_logger.get_summary()
+        print(f"✅ Saved {detailed_logger.logged_decisions} detailed routing decisions")
+        print(f"   Total decisions: {detailed_logger.total_decisions}")
+        print(f"   Log directory: {detailed_logger.output_dir}")
+        if 'global' in summary:
+            print(f"   Avg experts: {summary['global']['avg_experts']:.2f}")
+        print("="*70)
+
     accuracy = correct / total if total > 0 else 0.0
 
     return {
@@ -349,7 +472,8 @@ def evaluate_lambada(
         'correct': correct,
         'total': total,
         'predictions': predictions,
-        'internal_logs': internal_logs
+        'internal_logs': internal_logs,
+        'detailed_logger': detailed_logger
     }
 
 
@@ -359,7 +483,12 @@ def evaluate_hellaswag(
     dataset: List[Dict[str, Any]],
     patcher=None,
     max_length: int = 512,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    # Detailed logging parameters
+    log_routing: bool = False,
+    output_dir: str = './logs',
+    experiment_name: str = 'eval_hellaswag',
+    log_every_n: int = 5
 ) -> Dict[str, Any]:
     """
     Evaluate accuracy on HellaSwag with optional internal routing logging.
@@ -386,9 +515,30 @@ def evaluate_hellaswag(
     """
     model.eval()
     correct = 0
+    correct_normalized = 0  # Track length-normalized accuracy separately
     total = 0
     predictions = []
     internal_logs = [] if patcher else None
+
+    # Create detailed logger if requested
+    detailed_logger = None
+    if log_routing and output_dir and patcher:
+        detailed_logger = HCRoutingLogger(
+            output_dir=output_dir,
+            experiment_name=experiment_name,
+            log_every_n=log_every_n
+        )
+        print(f"✅ Created HCRoutingLogger: {experiment_name}")
+        print(f"   Logging to: {output_dir}")
+
+        # Attach logger to integration
+        if hasattr(patcher, 'set_external_logger'):
+            patcher.set_external_logger(detailed_logger)
+        elif hasattr(patcher, '_logger'):
+            patcher._logger = detailed_logger
+        else:
+            print("⚠️  Warning: Cannot attach logger to patcher")
+            detailed_logger = None
 
     # Clear any existing logs
     if patcher and hasattr(patcher, 'clear_internal_logs'):
@@ -407,8 +557,10 @@ def evaluate_hellaswag(
             if patcher and hasattr(patcher, 'start_sample_logging'):
                 patcher.start_sample_logging(i, ctx[:100])
 
-            # Score each ending
-            ending_scores = []
+            # Score each ending (both raw and length-normalized)
+            ending_scores_raw = []
+            ending_scores_normalized = []
+            ending_lengths = []
 
             for ending in endings:
                 full_text = ctx + " " + ending
@@ -425,43 +577,91 @@ def evaluate_hellaswag(
                 # Get log probability of this completion
                 outputs = model(input_ids, labels=input_ids)
                 loss = outputs.loss.item()
+                num_tokens = input_ids.shape[1]
 
-                # Lower loss = higher probability
-                ending_scores.append(-loss)
+                # Raw score: Lower loss = higher probability
+                raw_score = -loss
+                ending_scores_raw.append(raw_score)
+                ending_lengths.append(num_tokens)
 
-            # Predict ending with highest score
-            predicted_idx = int(np.argmax(ending_scores))
-            is_correct = (predicted_idx == label)
+                # Normalized score: Divide by length to prevent bias toward shorter endings
+                # This is the fairer comparison method
+                normalized_score = -loss / num_tokens if num_tokens > 0 else -loss
+                ending_scores_normalized.append(normalized_score)
 
-            if is_correct:
+            # Predict ending with highest score (raw method)
+            predicted_idx_raw = int(np.argmax(ending_scores_raw))
+            is_correct_raw = (predicted_idx_raw == label)
+
+            # Predict ending with highest score (normalized method - recommended)
+            predicted_idx_normalized = int(np.argmax(ending_scores_normalized))
+            is_correct_normalized = (predicted_idx_normalized == label)
+
+            # Track both methods
+            if is_correct_raw:
                 correct += 1
+            if is_correct_normalized:
+                correct_normalized += 1
             total += 1
 
             predictions.append({
                 'context': ctx,
                 'endings': endings,
+                'ending_lengths': ending_lengths,
                 'label': label,
-                'predicted': predicted_idx,
-                'correct': is_correct,
-                'scores': ending_scores
+                'predicted_raw': predicted_idx_raw,
+                'predicted_normalized': predicted_idx_normalized,
+                'correct_raw': is_correct_raw,
+                'correct_normalized': is_correct_normalized,
+                'scores_raw': ending_scores_raw,
+                'scores_normalized': ending_scores_normalized
             })
 
             # End logging
             if patcher and hasattr(patcher, 'end_sample_logging'):
-                patcher.end_sample_logging(ending_scores[label])  # Use true ending's score as loss
+                patcher.end_sample_logging(ending_scores_raw[label])  # Use true ending's score as loss
 
     # Collect internal logs
     if patcher and hasattr(patcher, 'get_internal_logs'):
         internal_logs = patcher.get_internal_logs()
 
-    accuracy = correct / total if total > 0 else 0.0
+    # Save detailed logs if logger was created
+    if detailed_logger:
+        print("\n" + "="*70)
+        print("SAVING DETAILED ROUTING LOGS")
+        print("="*70)
+        detailed_logger.save_logs()
+        detailed_logger.generate_plots()
+        summary = detailed_logger.get_summary()
+        print(f"✅ Saved {detailed_logger.logged_decisions} detailed routing decisions")
+        print(f"   Total decisions: {detailed_logger.total_decisions}")
+        print(f"   Log directory: {detailed_logger.output_dir}")
+        if 'global' in summary:
+            print(f"   Avg experts: {summary['global']['avg_experts']:.2f}")
+        print("="*70)
+
+    # Compute both accuracies
+    accuracy_raw = correct / total if total > 0 else 0.0
+    accuracy_normalized = correct_normalized / total if total > 0 else 0.0
 
     return {
-        'accuracy': accuracy,
+        # Primary accuracy (raw - for backward compatibility)
+        'accuracy': accuracy_raw,
         'correct': correct,
         'total': total,
+
+        # Raw scoring (default, may favor shorter endings)
+        'accuracy_raw': accuracy_raw,
+        'correct_raw': correct,
+
+        # Length-normalized scoring (recommended, fairer comparison)
+        'accuracy_normalized': accuracy_normalized,
+        'correct_normalized': correct_normalized,
+
+        # Data
         'predictions': predictions,
-        'internal_logs': internal_logs
+        'internal_logs': internal_logs,
+        'detailed_logger': detailed_logger
     }
 
 

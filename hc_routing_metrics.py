@@ -6,12 +6,18 @@ Computes quality and efficiency metrics for HC routing including:
 - Standard routing metrics (expert counts, entropy)
 - HC-specific metrics (threshold stability, signal strength)
 - Comparison metrics (vs baseline, vs BH)
+- Unified evaluation metrics across all datasets
+- Metrics aggregation and comparison utilities
 """
 
 import torch
 import numpy as np
+import pandas as pd
+import json
+from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 
 @dataclass
@@ -204,3 +210,179 @@ class HCMetricsComputer:
             'bh_wins_pct': (bh > hc).float().mean().item() * 100,
             'ties_pct': (hc == bh).float().mean().item() * 100,
         }
+
+
+# =============================================================================
+# UNIFIED EVALUATION METRICS (Cross-Dataset)
+# =============================================================================
+
+@dataclass
+class UnifiedEvaluationMetrics:
+    """
+    Unified metrics dataclass for comprehensive HC routing evaluation.
+
+    Captures ALL metrics across datasets with consistent schema:
+    - Dataset identification
+    - Task-specific metrics (perplexity, accuracy)
+    - Routing metrics (expert selection behavior)
+    - TopK agreement (comparison with TopK-8)
+    - Diagnostic metrics (loss distribution, timing)
+
+    This is the PRIMARY metrics class for cross-dataset comparisons.
+    """
+
+    # === DATASET IDENTIFICATION ===
+    dataset_name: str  # 'wikitext', 'lambada', 'hellaswag'
+    routing_type: str  # 'topk' or 'hc'
+    config_name: str  # e.g., 'topk_8', 'hc_beta0.5_maxk16'
+    beta: Optional[float] = None  # HC beta parameter (None for TopK)
+    min_k: int = 1
+    max_k: int = 64
+
+    # === TASK METRICS ===
+    # WikiText
+    perplexity: Optional[float] = None  # Token-weighted (primary)
+    perplexity_token_weighted: Optional[float] = None  # Explicit
+    perplexity_sample_weighted: Optional[float] = None  # For comparison
+    avg_loss: Optional[float] = None
+    avg_loss_token_weighted: Optional[float] = None
+    avg_loss_sample_weighted: Optional[float] = None
+
+    # LAMBADA & HellaSwag
+    accuracy: Optional[float] = None  # Raw accuracy
+    accuracy_raw: Optional[float] = None  # Explicit (may favor shorter endings)
+    accuracy_normalized: Optional[float] = None  # Length-normalized (HellaSwag only)
+
+    # === ROUTING METRICS (all datasets) ===
+    avg_experts: float = 0.0
+    std_experts: float = 0.0
+    min_experts_observed: int = 0
+    max_experts_observed: int = 0
+
+    # Expert selection distribution
+    floor_hit_rate: float = 0.0  # % hitting min_k
+    ceiling_hit_rate: float = 0.0  # % hitting max_k
+    mid_range_rate: float = 0.0  # % in adaptive range
+
+    # Weight analysis (CRITICAL for diagnosis)
+    avg_weight_sum: float = 0.0
+    std_weight_sum: float = 0.0
+    min_weight_sum: float = 0.0
+    max_weight_sum: float = 0.0
+
+    # Selection diversity
+    selection_entropy: float = 0.0
+    expert_utilization: float = 0.0  # Fraction of 64 experts ever used
+
+    # === TOPK AGREEMENT METRICS ===
+    avg_topk_jaccard: float = 0.0  # Average Jaccard similarity with TopK-8
+    avg_topk_intersection: float = 0.0  # Average experts in common
+    topk_agreement_by_layer: Dict[int, float] = field(default_factory=dict)  # Per-layer Jaccard
+
+    # === DIAGNOSTIC METRICS ===
+    loss_std: Optional[float] = None  # Std dev of losses
+    loss_p95: Optional[float] = None  # 95th percentile loss
+    loss_p99: Optional[float] = None  # 99th percentile loss
+
+    num_samples: int = 0  # Number of samples evaluated
+    total_tokens: int = 0  # Total tokens processed
+    evaluation_time_seconds: float = 0.0  # Wall clock time
+
+    # === METADATA ===
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary with all fields."""
+        return asdict(self)
+
+    def to_dataframe_row(self) -> pd.DataFrame:
+        """Convert to single-row DataFrame for easy concatenation."""
+        return pd.DataFrame([self.to_dict()])
+
+    def save_json(self, filepath: str):
+        """Save metrics to JSON file."""
+        filepath = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+        print(f"✅ Saved metrics to: {filepath}")
+
+    @classmethod
+    def load_json(cls, filepath: str) -> 'UnifiedEvaluationMetrics':
+        """Load metrics from JSON file."""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return cls(**data)
+
+
+def save_metrics(
+    metrics: UnifiedEvaluationMetrics,
+    output_dir: str = './metrics',
+    experiment_name: str = 'experiment',
+    append_to_cumulative: bool = True
+):
+    """
+    Save metrics in multiple formats with summary output.
+
+    Args:
+        metrics: UnifiedEvaluationMetrics instance
+        output_dir: Directory to save metrics
+        experiment_name: Name for this experiment
+        append_to_cumulative: Whether to append to cumulative CSV
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Save JSON with timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    json_path = output_dir / f'{experiment_name}_metrics_{timestamp}.json'
+    metrics.save_json(json_path)
+
+    # 2. Append to cumulative CSV
+    if append_to_cumulative:
+        cumulative_csv = output_dir / 'all_experiments_metrics.csv'
+        df = metrics.to_dataframe_row()
+
+        if cumulative_csv.exists():
+            existing_df = pd.read_csv(cumulative_csv)
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            combined_df.to_csv(cumulative_csv, index=False)
+        else:
+            df.to_csv(cumulative_csv, index=False)
+
+        print(f"✅ Appended to cumulative CSV: {cumulative_csv}")
+
+    # 3. Print summary table
+    print("\n" + "="*70)
+    print(f"METRICS SUMMARY: {experiment_name}")
+    print("="*70)
+
+    summary_data = {}
+
+    if metrics.perplexity is not None:
+        summary_data['Perplexity'] = f"{metrics.perplexity:.2f}"
+        if metrics.perplexity_sample_weighted:
+            summary_data['PPL (sample-weighted)'] = f"{metrics.perplexity_sample_weighted:.2f}"
+
+    if metrics.accuracy is not None:
+        summary_data['Accuracy'] = f"{metrics.accuracy:.4f}"
+    if metrics.accuracy_normalized is not None:
+        summary_data['Accuracy (normalized)'] = f"{metrics.accuracy_normalized:.4f}"
+
+    summary_data['Avg Experts'] = f"{metrics.avg_experts:.2f}"
+    summary_data['Avg Weight Sum'] = f"{metrics.avg_weight_sum:.4f}"
+
+    if metrics.avg_topk_jaccard > 0:
+        summary_data['TopK Agreement'] = f"{metrics.avg_topk_jaccard:.4f}"
+
+    summary_data['Floor Hit Rate'] = f"{metrics.floor_hit_rate:.1f}%"
+    summary_data['Ceiling Hit Rate'] = f"{metrics.ceiling_hit_rate:.1f}%"
+
+    max_key_len = max(len(k) for k in summary_data.keys())
+    for key, value in summary_data.items():
+        print(f"  {key:<{max_key_len}} : {value}")
+
+    print("="*70 + "\n")
