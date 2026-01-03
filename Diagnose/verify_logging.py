@@ -50,7 +50,7 @@ def verify_logging():
     # Step 1: Create logger
     print("STEP 1: Creating HCRoutingLogger...")
     try:
-        log_dir = "test_hc_logs"
+        log_dir = "../test_hc_logs"
         logger = HCRoutingLogger(
             output_dir=log_dir,
             experiment_name="verification_test",

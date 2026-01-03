@@ -50,7 +50,7 @@ def test_hc_routing_standalone():
 
     # Create logger
     logger = HCRoutingLogger(
-        output_dir="./test_logs",
+        output_dir="../test_logs",
         experiment_name="standalone_test",
         log_every_n=1  # Log every decision for testing
     )

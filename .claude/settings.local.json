@@ -19,7 +19,8 @@
       "Bash(chmod:*)",
       "Bash(python -c:*)",
       "Bash(test:*)",
-      "Bash(.venv/bin/pip:*)"
+      "Bash(.venv/bin/pip:*)",
+      "Bash(python test_weight_computation.py:*)"
     ],
     "deny": [],
     "ask": []

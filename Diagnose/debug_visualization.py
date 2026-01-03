@@ -358,7 +358,7 @@ def main():
     print("BH Routing P-value Issue Visualization")
     print("=" * 70)
     
-    output_dir = Path('/Users/aliab/Desktop/GitHub/MOE-with-feature-selection/visualizations')
+    output_dir = Path('/visualizations')
     output_dir.mkdir(exist_ok=True)
     
     # Figure 1: Comparison grid
