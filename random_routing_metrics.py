@@ -67,9 +67,9 @@ class UnifiedEvaluationMetrics:
     Unified metrics dataclass for comprehensive random routing evaluation.
     """
     dataset_name: str
-    routing_type: str = 'random'
     config_name: str
-    experts_amount: int
+    experts_amount: int = 8
+    routing_type: str = 'random'
     sum_of_weights: Optional[float] = None
     
     perplexity: Optional[float] = None
