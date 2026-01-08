@@ -21,12 +21,12 @@ Example:
 
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, Union
 
 def random_routing(
     router_logits: torch.Tensor,
     experts_amount: int = 8,
-    sum_of_weights: Optional[float] = None,
+    sum_of_weights: Union[Optional[float], str] = None,
     temperature: float = 1.0
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict]]:
     """
@@ -37,13 +37,15 @@ def random_routing(
             Shape: [batch, seq_len, num_experts] or [num_tokens, num_experts]
         experts_amount: The number of experts to select randomly.
         sum_of_weights: The target sum for the weights of the selected experts.
-            If None, it is calculated as the sum of the top 8 expert weights.
+            If a number, scales the weights of the selected experts to that number.
+            If "original", the original weights of the selected experts are used.
+            If None, scales the weights to the sum of weights of the top 8 experts.
         temperature: Softmax temperature for weight computation (default: 1.0)
 
     Returns:
-        routing_weights: Normalized weights for selected experts 
+        routing_weights: Normalized weights for selected experts
             Shape: [batch, seq_len, num_experts]
-        
+
         selected_experts: Indices of selected experts (padded with -1)
             Shape: [batch, seq_len, experts_amount]
         expert_counts: Number of experts selected per token
@@ -84,32 +86,34 @@ def random_routing(
     ])
 
     # =========================================================================
-    # STEP 4: Determine sum_of_weights if not provided
-    # =========================================================================
-    if sum_of_weights is None:
-        top8_weights, _ = torch.topk(weights, 8, dim=1)
-        target_sum_of_weights = top8_weights.sum(dim=1)
-    else:
-        target_sum_of_weights = torch.full((num_tokens,), sum_of_weights, device=device)
-
-    # =========================================================================
-    # STEP 5: Normalize the weights of the chosen experts
+    # STEP 4: Determine sum_of_weights and normalize
     # =========================================================================
     routing_weights = torch.zeros_like(weights)
-    
-    for i in range(num_tokens):
-        selected_indices = random_experts_indices[i]
-        selected_weights = weights[i, selected_indices]
-        
-        current_sum = selected_weights.sum()
-        
-        if current_sum > 1e-9: # Avoid division by zero
-            normalization_factor = target_sum_of_weights[i] / current_sum
-            normalized_weights = selected_weights * normalization_factor
-            routing_weights[i, selected_indices] = normalized_weights
+
+    if sum_of_weights == "original":
+        for i in range(num_tokens):
+            selected_indices = random_experts_indices[i]
+            routing_weights[i, selected_indices] = weights[i, selected_indices]
+    else:
+        if sum_of_weights is None:
+            top8_weights, _ = torch.topk(weights, 8, dim=1)
+            target_sum_of_weights = top8_weights.sum(dim=1)
+        else:
+            target_sum_of_weights = torch.full((num_tokens,), sum_of_weights, device=device)
+
+        for i in range(num_tokens):
+            selected_indices = random_experts_indices[i]
+            selected_weights = weights[i, selected_indices]
+
+            current_sum = selected_weights.sum()
+
+            if current_sum > 1e-9: # Avoid division by zero
+                normalization_factor = target_sum_of_weights[i] / current_sum
+                normalized_weights = selected_weights * normalization_factor
+                routing_weights[i, selected_indices] = normalized_weights
 
     # =========================================================================
-    # STEP 6: Get selected expert indices (padded with -1)
+    # STEP 5: Get selected expert indices (padded with -1)
     # =========================================================================
     selected_experts = torch.full((num_tokens, experts_amount), -1, device=device, dtype=torch.long)
     for i in range(num_tokens):
@@ -118,7 +122,7 @@ def random_routing(
     expert_counts = torch.full((num_tokens,), experts_amount, device=device)
 
     # =========================================================================
-    # STEP 7: Reshape outputs to match input shape
+    # STEP 6: Reshape outputs to match input shape
     # =========================================================================
     routing_weights = routing_weights.view(batch_size, seq_len, num_experts)
     selected_experts = selected_experts.view(batch_size, seq_len, experts_amount)
@@ -140,17 +144,17 @@ if __name__ == "__main__":
     print("=" * 70)
     print("RANDOM ROUTING - TEST")
     print("=" * 70)
-    
+
     torch.manual_seed(42)
     logits = torch.randn(1, 10, 64) # batch=1, seq=10, experts=64
-    
+
     # Test with specified sum_of_weights
     print("\nTesting with specified sum_of_weights=0.5 and experts_amount=4:\n")
     weights, experts, counts, _ = random_routing(
         logits, experts_amount=4, sum_of_weights=0.5
     )
-    
-    print(f"Expert counts per token: {counts[0]}")
+
+    print(f"Expert counts per token: {counts[0, 0]}")
     print(f"Selected experts for first token: {experts[0, 0]}")
     print(f"Sum of weights for first token: {weights[0, 0].sum():.4f}")
 
@@ -159,14 +163,29 @@ if __name__ == "__main__":
     weights_dyn, experts_dyn, counts_dyn, _ = random_routing(
         logits, experts_amount=4
     )
-    
+
     # Calculate what the sum should be for the first token
     base_weights = F.softmax(logits[0, 0] / 1.0, dim=-1)
     top8_sum = torch.topk(base_weights, 8)[0].sum()
 
-    print(f"Expert counts per token: {counts_dyn[0]}")
+    print(f"Expert counts per token: {counts_dyn[0, 0]}")
     print(f"Selected experts for first token: {experts_dyn[0, 0]}")
     print(f"Sum of weights for first token: {weights_dyn[0, 0].sum():.4f} (expected: ~{top8_sum:.4f})")
+
+    # Test with "original" sum_of_weights
+    print("\nTesting with sum_of_weights='original' and experts_amount=4:\n")
+    weights_orig, experts_orig, counts_orig, _ = random_routing(
+        logits, experts_amount=4, sum_of_weights="original"
+    )
+    base_weights = F.softmax(logits[0,0] / 1.0, dim=-1)
+    selected_indices_for_token0 = experts_orig[0, 0]
+    expected_sum = base_weights[selected_indices_for_token0].sum()
+    actual_sum = weights_orig[0, 0].sum()
+    print(f"Expert counts per token: {counts_orig[0, 0]}")
+    print(f"Selected experts for first token: {selected_indices_for_token0}")
+    print(f"Sum of weights for first token: {actual_sum:.4f} (expected: ~{expected_sum:.4f})")
+    assert torch.isclose(actual_sum, expected_sum), "Sum for 'original' failed"
+
 
     print("\n" + "=" * 70)
     print("✅ All tests passed!")

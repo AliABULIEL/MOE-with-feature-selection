@@ -172,7 +172,8 @@ class RandomRoutingIntegration:
         experts_amount: int = 8,
         sum_of_weights: Optional[float] = None,
         temperature: float = 1.0,
-        collect_stats: bool = True
+        collect_stats: bool = True,
+        layers_to_patch: Optional[List[int]] = None
     ):
         """
         Patch model to use Random routing.
@@ -181,9 +182,8 @@ class RandomRoutingIntegration:
             experts_amount: Number of experts to select randomly.
             sum_of_weights: Target sum of weights for normalization. If None, it's calculated from top 8 weights.
             temperature: Softmax temperature for weight computation.
-            logger: Optional external logger for detailed logging.
-            log_every_n: Logging frequency (every N tokens).
             collect_stats: Whether to collect routing statistics.
+            layers_to_patch: A list of layer indices to patch. If None, all layers are patched.
         """
         if self.is_patched:
             print("Model already patched. Call unpatch_model() first.")
@@ -248,16 +248,23 @@ class RandomRoutingIntegration:
 
             return random_forward
 
-        for name, block in self.moe_blocks.items():
+        blocks_to_patch = self.moe_blocks
+        if layers_to_patch is not None:
+            blocks_to_patch = {name: block for name, block in self.moe_blocks.items() if
+                               int(name.split('.')[2]) in layers_to_patch}
+
+        for name, block in blocks_to_patch.items():
             self.original_forwards[name] = block.forward
             block.forward = create_random_forward(name, block)
 
         self.is_patched = True
         assert self.is_patched, "Patching failed silently"
-        assert len(self.moe_blocks) > 0, "No MoE blocks found"
+        assert len(blocks_to_patch) > 0, "No MoE blocks found to patch"
 
-        print(f"✅ Patched {len(self.moe_blocks)} MoE blocks with Random routing")
+        print(f"✅ Patched {len(blocks_to_patch)} MoE blocks with Random routing")
         print(f"   Config: experts_amount={experts_amount}, sum_of_weights={sum_of_weights}")
+        if layers_to_patch is not None:
+            print(f"   Patched layers: {layers_to_patch}")
 
     def unpatch_model(self):
         if not self.is_patched:
@@ -339,7 +346,8 @@ def create_random_patched_model(
     model,
     experts_amount: int = 8,
     sum_of_weights: Optional[float] = None,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    layers_to_patch: Optional[List[int]] = None
 ) -> RandomRoutingIntegration:
     """
     Convenience function to create and patch a model with Random routing.
@@ -349,18 +357,20 @@ def create_random_patched_model(
         experts_amount: Number of experts to select randomly.
         sum_of_weights: Target sum of weights for normalization.
         device: Device for computation
+        layers_to_patch: A list of layer indices to patch. If None, all layers are patched.
 
     Returns:
         RandomRoutingIntegration instance (already patched)
 
     Example:
-        >>> integration = create_random_patched_model(model, experts_amount=4)
-        >>> output = model(input_ids)  # Uses Random routing
+        >>> integration = create_random_patched_model(model, experts_amount=4, layers_to_patch=[0, 1, 2])
+        >>> output = model(input_ids)  # Uses Random routing on specified layers
         >>> integration.unpatch_model()
     """
     integration = RandomRoutingIntegration(model, device=device)
     integration.patch_model(
         experts_amount=experts_amount,
-        sum_of_weights=sum_of_weights
+        sum_of_weights=sum_of_weights,
+        layers_to_patch=layers_to_patch
     )
     return integration
