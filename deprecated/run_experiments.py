@@ -32,7 +32,7 @@ import argparse
 import sys
 from pathlib import Path
 from datetime import datetime
-from olmoe_routing_experiments import RoutingExperimentRunner
+from deprecated.olmoe_routing_experiments import RoutingExperimentRunner
 
 
 def print_banner():

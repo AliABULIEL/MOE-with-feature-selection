@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from hc_routing import higher_criticism_routing
 from hc_routing_logging import HCRoutingLogger
-from bh_routing import load_kde_models
+from deprecated.bh_routing import load_kde_models
 
 
 def test_hc_routing_standalone():

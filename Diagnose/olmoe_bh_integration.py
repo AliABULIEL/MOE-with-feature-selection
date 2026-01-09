@@ -44,7 +44,7 @@ from collections import defaultdict
 
 # Import BH routing module
 try:
-    from bh_routing import benjamini_hochberg_routing
+    from deprecated.bh_routing import benjamini_hochberg_routing
 except ImportError:
     raise ImportError(
         "Cannot import bh_routing module. Ensure bh_routing.py is in the same directory."

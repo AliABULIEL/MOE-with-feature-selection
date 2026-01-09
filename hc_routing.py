@@ -43,7 +43,7 @@ from typing import Tuple, Optional, Dict, Any, List, Union, TYPE_CHECKING
 import warnings
 
 # REUSE from existing BH implementation
-from bh_routing import (
+from deprecated.bh_routing import (
     load_kde_models,
     compute_pvalues_kde,
     compute_pvalues_empirical
@@ -686,7 +686,7 @@ def compare_hc_vs_bh(
         Dict with 'hc_counts', 'bh_counts', 'hc_selected', 'bh_selected',
         'hc_wins', 'bh_wins', 'ties'
     """
-    from bh_routing import benjamini_hochberg_routing
+    from deprecated.bh_routing import benjamini_hochberg_routing
 
     if kde_models is None:
         kde_models = load_kde_models()

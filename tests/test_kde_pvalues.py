@@ -9,7 +9,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bh_routing import benjamini_hochberg_routing, load_kde_models
+from deprecated.bh_routing import benjamini_hochberg_routing, load_kde_models
 
 print("=" * 70)
 print("KDE P-VALUE DIAGNOSTIC")

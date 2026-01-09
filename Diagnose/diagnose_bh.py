@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bh_routing import benjamini_hochberg_routing
+from deprecated.bh_routing import benjamini_hochberg_routing
 
 def diagnose_bh_algorithm():
     """Diagnose BH algorithm behavior with different alpha and max_k values."""

@@ -16,7 +16,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bh_routing import benjamini_hochberg_routing, compute_pvalues_empirical
+from deprecated.bh_routing import benjamini_hochberg_routing, compute_pvalues_empirical
 
 
 class BHRoutingTests:

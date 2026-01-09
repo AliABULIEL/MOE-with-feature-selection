@@ -51,12 +51,12 @@ except ImportError:
     raise ImportError("transformers not installed. Run: pip install transformers")
 
 try:
-    from bh_routing_metrics import BHMetricsComputer
-    from bh_routing_evaluation import (
+    from deprecated.bh_routing_metrics import BHMetricsComputer
+    from week_4.bh_routing_evaluation import (
         load_wikitext, load_lambada, load_hellaswag,
         evaluate_perplexity, evaluate_lambada, evaluate_hellaswag
     )
-    from bh_routing import load_kde_models
+    from deprecated.bh_routing import load_kde_models
 except ImportError as e:
     raise ImportError(
         f"Could not import required modules: {e}\n"
@@ -125,7 +125,7 @@ class BHRoutingPatcherAdapter:
 
     def patch_with_bh(self, alpha: float, max_k: int, min_k: int = 1):
         """Configure for BH routing."""
-        from bh_routing import benjamini_hochberg_routing
+        from deprecated.bh_routing import benjamini_hochberg_routing
 
         self.routing_type = 'bh'
         self.alpha = alpha
@@ -140,7 +140,7 @@ class BHRoutingPatcherAdapter:
 
     def _patch_moe_blocks_with_bh(self):
         """Patch all MoE blocks to use BH routing."""
-        from bh_routing import benjamini_hochberg_routing
+        from deprecated.bh_routing import benjamini_hochberg_routing
 
         layer_idx = 0
         for name, module in self.model.named_modules():

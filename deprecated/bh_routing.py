@@ -30,7 +30,7 @@ import pickle
 
 # Import BHRoutingLogger for type checking only (avoid circular imports)
 if TYPE_CHECKING:
-    from bh_routing_logging import BHRoutingLogger
+    from week_4.bh_routing_logging import BHRoutingLogger
 
 # Global cache for KDE models
 _kde_models_cache: Dict[int, Dict] = {}

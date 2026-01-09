@@ -21,7 +21,7 @@ Analyzed layers: Layer 0 (first MoE) and Layer 7 (middle MoE)
 import torch
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from bh_routing import load_kde_models, compute_pvalues_kde, benjamini_hochberg_routing
+from deprecated.bh_routing import load_kde_models, compute_pvalues_kde, benjamini_hochberg_routing
 
 # Configuration
 MODEL_NAME = "allenai/OLMoE-1B-7B-0924"

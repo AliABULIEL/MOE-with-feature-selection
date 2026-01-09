@@ -99,7 +99,7 @@ def verify_imports():
 
     # Test BH routing
     try:
-        from bh_routing import benjamini_hochberg_routing, load_kde_models
+        from deprecated.bh_routing import benjamini_hochberg_routing, load_kde_models
         all_passed &= print_check(True, "Import bh_routing: benjamini_hochberg_routing, load_kde_models")
     except ImportError as e:
         all_passed &= print_check(False, f"Import bh_routing failed: {e}")

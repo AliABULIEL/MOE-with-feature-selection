@@ -21,7 +21,7 @@ from hc_routing import (
     run_hc_multi_beta,
     compare_hc_bh,
 )
-from bh_routing import load_kde_models, benjamini_hochberg_routing
+from deprecated.bh_routing import load_kde_models, benjamini_hochberg_routing
 
 
 class TestHCScoreComputation:

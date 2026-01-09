@@ -22,7 +22,7 @@ import os
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bh_routing import benjamini_hochberg_routing
+from deprecated.bh_routing import benjamini_hochberg_routing
 
 def test_bh_routing_fix():
     """Test that BH routing produces variable expert counts based on alpha."""
