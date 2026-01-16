@@ -40,6 +40,245 @@ warnings.filterwarnings('ignore')
 
 
 # ==============================================================================
+# HELPER FUNCTIONS FOR METRIC COMPUTATION
+# ==============================================================================
+
+def compute_token_accuracy(
+    model,
+    tokenizer,
+    texts: List[str],
+    max_length: int = 512,
+    device: str = 'cuda'
+) -> Dict[str, Any]:
+    """
+    Compute next-token prediction accuracy across all tokens in texts.
+
+    This measures what % of tokens are correctly predicted by the model
+    when given the previous context. Used for WikiText and general text evaluation.
+
+    Args:
+        model: OLMoE model instance
+        tokenizer: Tokenizer for the model
+        texts: List of text samples
+        max_length: Maximum sequence length (default: 512)
+        device: Device to run on ('cuda', 'cpu')
+
+    Returns:
+        Dictionary containing:
+        - accuracy: float in [0, 1] - overall token accuracy
+        - correct_tokens: int - total correct predictions
+        - total_tokens: int - total tokens evaluated
+        - per_sample_accuracy: List[float] - accuracy per sample
+
+    Examples:
+        >>> result = compute_token_accuracy(model, tokenizer, texts)
+        >>> print(f"Token Accuracy: {result['accuracy']:.4f}")
+        >>> print(f"Correct: {result['correct_tokens']}/{result['total_tokens']}")
+    """
+    model.eval()
+
+    total_correct = 0
+    total_tokens = 0
+    per_sample_accuracy = []
+
+    with torch.no_grad():
+        for text in texts:
+            if not text.strip():
+                continue
+
+            # Tokenize
+            inputs = tokenizer(
+                text,
+                return_tensors='pt',
+                truncation=True,
+                max_length=max_length,
+                padding=False
+            )
+
+            input_ids = inputs['input_ids'].to(device)
+
+            if input_ids.shape[1] < 2:
+                continue  # Need at least 2 tokens for next-token prediction
+
+            # Forward pass
+            outputs = model(input_ids)
+            logits = outputs.logits  # [1, seq_len, vocab_size]
+
+            # Get predictions: argmax of logits at each position
+            predictions = torch.argmax(logits[0], dim=-1)  # [seq_len]
+
+            # Compare predictions with actual next tokens
+            # predictions[i] should predict input_ids[i+1]
+            # So we compare predictions[:-1] with input_ids[0, 1:]
+            targets = input_ids[0, 1:]  # Skip first token (no previous context)
+            preds = predictions[:-1]     # Skip last prediction (no target)
+
+            # Count correct predictions
+            correct = (preds == targets).sum().item()
+            num_tokens = len(targets)
+
+            total_correct += correct
+            total_tokens += num_tokens
+
+            # Per-sample accuracy
+            sample_acc = correct / num_tokens if num_tokens > 0 else 0.0
+            per_sample_accuracy.append(sample_acc)
+
+    accuracy = total_correct / total_tokens if total_tokens > 0 else 0.0
+
+    return {
+        'accuracy': accuracy,
+        'correct_tokens': total_correct,
+        'total_tokens': total_tokens,
+        'per_sample_accuracy': per_sample_accuracy
+    }
+
+
+def compute_perplexity_from_texts(
+    model,
+    tokenizer,
+    texts: List[str],
+    max_length: int = 512,
+    device: str = 'cuda'
+) -> Dict[str, Any]:
+    """
+    Compute perplexity on a list of text samples.
+
+    Reusable perplexity computation for any text-based dataset.
+    Returns token-weighted perplexity (standard language modeling metric).
+
+    Args:
+        model: OLMoE model instance
+        tokenizer: Tokenizer for the model
+        texts: List of text samples
+        max_length: Maximum sequence length (default: 512)
+        device: Device to run on ('cuda', 'cpu')
+
+    Returns:
+        Dictionary containing:
+        - perplexity: float - exp(avg_loss), token-weighted
+        - avg_loss: float - average cross-entropy loss
+        - total_tokens: int - total tokens processed
+        - num_samples: int - number of samples processed
+        - losses: List[float] - per-sample losses
+        - token_counts: List[int] - tokens per sample
+
+    Examples:
+        >>> result = compute_perplexity_from_texts(model, tokenizer, texts)
+        >>> print(f"Perplexity: {result['perplexity']:.2f}")
+    """
+    model.eval()
+
+    losses = []
+    token_counts = []
+    total_tokens = 0
+    samples_processed = 0
+
+    with torch.no_grad():
+        for text in texts:
+            if not text.strip():
+                continue
+
+            # Tokenize
+            inputs = tokenizer(
+                text,
+                return_tensors='pt',
+                truncation=True,
+                max_length=max_length,
+                padding=False
+            )
+
+            input_ids = inputs['input_ids'].to(device)
+
+            if input_ids.shape[1] < 2:
+                continue  # Skip very short sequences
+
+            # Forward pass with labels
+            outputs = model(input_ids, labels=input_ids)
+            loss = outputs.loss.item()
+            num_tokens = input_ids.shape[1]
+
+            losses.append(loss)
+            token_counts.append(num_tokens)
+            total_tokens += num_tokens
+            samples_processed += 1
+
+    # Compute token-weighted perplexity (standard practice)
+    if losses and total_tokens > 0:
+        total_weighted_loss = sum(loss * count for loss, count in zip(losses, token_counts))
+        avg_loss = total_weighted_loss / total_tokens
+        perplexity = float(np.exp(avg_loss))
+    else:
+        avg_loss = float('inf')
+        perplexity = float('inf')
+
+    return {
+        'perplexity': perplexity,
+        'avg_loss': avg_loss,
+        'total_tokens': total_tokens,
+        'num_samples': samples_processed,
+        'losses': losses,
+        'token_counts': token_counts
+    }
+
+
+def extract_texts_for_perplexity(
+    dataset: List[Any],
+    dataset_type: str
+) -> List[str]:
+    """
+    Extract text samples from different dataset formats for perplexity computation.
+
+    Handles WikiText (already text), LAMBADA (extract full text),
+    and HellaSwag (context + correct ending).
+
+    Args:
+        dataset: List of dataset samples
+        dataset_type: 'wikitext', 'lambada', or 'hellaswag'
+
+    Returns:
+        List of text strings suitable for perplexity evaluation
+
+    Examples:
+        >>> wikitext_texts = extract_texts_for_perplexity(wikitext_data, 'wikitext')
+        >>> lambada_texts = extract_texts_for_perplexity(lambada_data, 'lambada')
+        >>> hellaswag_texts = extract_texts_for_perplexity(hellaswag_data, 'hellaswag')
+    """
+    texts = []
+
+    if dataset_type == 'wikitext':
+        # WikiText is already list of strings
+        texts = [text for text in dataset if text.strip()]
+
+    elif dataset_type == 'lambada':
+        # LAMBADA: extract full text (context + target word)
+        for sample in dataset:
+            if isinstance(sample, dict) and 'text' in sample:
+                text = sample['text']
+                if text.strip():
+                    texts.append(text)
+
+    elif dataset_type == 'hellaswag':
+        # HellaSwag: use context + correct ending
+        for sample in dataset:
+            if isinstance(sample, dict):
+                ctx = sample.get('ctx', '')
+                endings = sample.get('endings', [])
+                label = sample.get('label', 0)
+
+                if ctx and endings and 0 <= label < len(endings):
+                    correct_ending = endings[label]
+                    full_text = f"{ctx} {correct_ending}"
+                    texts.append(full_text)
+
+    else:
+        raise ValueError(f"Unknown dataset_type: {dataset_type}. "
+                        f"Must be 'wikitext', 'lambada', or 'hellaswag'")
+
+    return texts
+
+
+# ==============================================================================
 # DATASET LOADING
 # ==============================================================================
 
@@ -164,7 +403,9 @@ def evaluate_perplexity(
     log_every_n: int = 5
 ) -> Dict[str, Any]:
     """
-    Evaluate perplexity on WikiText-2 with optional internal routing logging.
+    Evaluate perplexity AND accuracy on WikiText-2 with optional internal routing logging.
+
+    UPDATED: Now computes both perplexity and next-token prediction accuracy.
 
     Args:
         model: OLMoE model instance
@@ -177,16 +418,18 @@ def evaluate_perplexity(
 
     Returns:
         Dictionary containing:
-        - perplexity: float
+        - perplexity: float - exp(avg_loss), token-weighted
+        - accuracy: float - next-token prediction accuracy [0, 1]
         - avg_loss: float
         - losses: List[float] per sample
         - internal_logs: List[Dict] if patcher provided, else None
         - num_samples: int
         - total_tokens: int
+        - correct_tokens: int - total correct next-token predictions
 
     Examples:
         >>> result = evaluate_perplexity(model, tokenizer, texts, patcher=patcher)
-        >>> print(f"PPL: {result['perplexity']:.2f}")
+        >>> print(f"PPL: {result['perplexity']:.2f}, Accuracy: {result['accuracy']:.4f}")
         >>> len(result['internal_logs'])  # Full routing data
         200
     """
@@ -194,6 +437,7 @@ def evaluate_perplexity(
     losses = []
     token_counts = []  # Track tokens per sample for proper weighting
     total_tokens = 0
+    total_correct_tokens = 0  # NEW: For accuracy computation
     internal_logs = [] if patcher else None
 
     # Create detailed logger if requested
@@ -255,6 +499,19 @@ def evaluate_perplexity(
             token_counts.append(num_tokens)
             total_tokens += num_tokens
 
+            # NEW: Compute accuracy for this sample
+            logits = outputs.logits  # [1, seq_len, vocab_size]
+            predictions = torch.argmax(logits[0], dim=-1)  # [seq_len]
+
+            # Compare predictions with actual next tokens
+            # predictions[i] should predict input_ids[i+1]
+            targets = input_ids[0, 1:]  # Skip first token
+            preds = predictions[:-1]     # Skip last prediction
+
+            # Count correct predictions
+            correct = (preds == targets).sum().item()
+            total_correct_tokens += correct
+
             # End logging for this sample
             if patcher and hasattr(patcher, 'end_sample_logging'):
                 patcher.end_sample_logging(loss)
@@ -304,9 +561,16 @@ def evaluate_perplexity(
         avg_loss_token_weighted = float('inf')
         avg_loss_sample_weighted = float('inf')
 
+    # NEW: Compute accuracy
+    # Note: total_tokens includes first token of each sequence which isn't predicted
+    # So we need to subtract len(losses) to get actual predictable tokens
+    num_predictable_tokens = total_tokens - len(losses) if losses else 0
+    accuracy = total_correct_tokens / num_predictable_tokens if num_predictable_tokens > 0 else 0.0
+
     return {
         # Primary metrics (token-weighted - CORRECT)
         'perplexity': perplexity,
+        'accuracy': accuracy,  # NEW: Next-token prediction accuracy
         'avg_loss': avg_loss,
 
         # Token-weighted metrics (explicit)
@@ -316,6 +580,10 @@ def evaluate_perplexity(
         # Sample-weighted metrics (for comparison)
         'perplexity_sample_weighted': perplexity_sample_weighted,
         'avg_loss_sample_weighted': avg_loss_sample_weighted,
+
+        # NEW: Accuracy details
+        'correct_tokens': total_correct_tokens,
+        'predictable_tokens': num_predictable_tokens,
 
         # Raw data
         'losses': losses,
@@ -341,7 +609,9 @@ def evaluate_lambada(
     log_every_n: int = 5
 ) -> Dict[str, Any]:
     """
-    Evaluate accuracy on LAMBADA with optional internal routing logging.
+    Evaluate accuracy AND perplexity on LAMBADA with optional internal routing logging.
+
+    UPDATED: Now computes both last-word accuracy and perplexity.
 
     Args:
         model: OLMoE model instance
@@ -353,15 +623,18 @@ def evaluate_lambada(
 
     Returns:
         Dictionary containing:
-        - accuracy: float in [0, 1]
+        - accuracy: float in [0, 1] - last word prediction accuracy
+        - perplexity: float - exp(avg_loss) on full texts
+        - avg_loss: float - average cross-entropy loss
         - correct: int
         - total: int
+        - total_tokens: int - tokens processed for perplexity
         - predictions: List[Dict] with prediction details
         - internal_logs: List[Dict] if patcher provided, else None
 
     Examples:
         >>> result = evaluate_lambada(model, tokenizer, samples, patcher=patcher)
-        >>> print(f"Accuracy: {result['accuracy']:.4f}")
+        >>> print(f"Accuracy: {result['accuracy']:.4f}, Perplexity: {result['perplexity']:.2f}")
     """
     model.eval()
     correct = 0
@@ -465,12 +738,33 @@ def evaluate_lambada(
             print(f"   Avg experts: {summary['global']['avg_experts']:.2f}")
         print("="*70)
 
+    # Compute accuracy
     accuracy = correct / total if total > 0 else 0.0
 
+    # NEW: Compute perplexity on full texts
+    # Extract full texts from dataset
+    texts = extract_texts_for_perplexity(dataset, 'lambada')
+
+    # Compute perplexity using helper function (without patcher to avoid double logging)
+    perplexity_result = compute_perplexity_from_texts(
+        model, tokenizer, texts, max_length=max_length, device=device
+    )
+
     return {
+        # Primary metrics
         'accuracy': accuracy,
+        'perplexity': perplexity_result['perplexity'],  # NEW
+        'avg_loss': perplexity_result['avg_loss'],  # NEW
+
+        # Accuracy details
         'correct': correct,
         'total': total,
+
+        # Perplexity details (NEW)
+        'total_tokens': perplexity_result['total_tokens'],
+        'num_samples': perplexity_result['num_samples'],
+
+        # Other data
         'predictions': predictions,
         'internal_logs': internal_logs,
         'detailed_logger': detailed_logger
@@ -491,7 +785,9 @@ def evaluate_hellaswag(
     log_every_n: int = 5
 ) -> Dict[str, Any]:
     """
-    Evaluate accuracy on HellaSwag with optional internal routing logging.
+    Evaluate accuracy AND perplexity on HellaSwag with optional internal routing logging.
+
+    UPDATED: Now computes both ending selection accuracy and perplexity.
 
     Args:
         model: OLMoE model instance
@@ -503,15 +799,18 @@ def evaluate_hellaswag(
 
     Returns:
         Dictionary containing:
-        - accuracy: float in [0, 1]
+        - accuracy: float in [0, 1] - ending selection accuracy
+        - perplexity: float - exp(avg_loss) on context + correct ending
+        - avg_loss: float - average cross-entropy loss
         - correct: int
         - total: int
+        - total_tokens: int - tokens processed for perplexity
         - predictions: List[Dict] with prediction details
         - internal_logs: List[Dict] if patcher provided, else None
 
     Examples:
         >>> result = evaluate_hellaswag(model, tokenizer, samples, patcher=patcher)
-        >>> print(f"Accuracy: {result['accuracy']:.4f}")
+        >>> print(f"Accuracy: {result['accuracy']:.4f}, Perplexity: {result['perplexity']:.2f}")
     """
     model.eval()
     correct = 0
@@ -644,9 +943,22 @@ def evaluate_hellaswag(
     accuracy_raw = correct / total if total > 0 else 0.0
     accuracy_normalized = correct_normalized / total if total > 0 else 0.0
 
+    # NEW: Compute perplexity on context + correct ending
+    # Extract texts (context + correct ending) from dataset
+    texts = extract_texts_for_perplexity(dataset, 'hellaswag')
+
+    # Compute perplexity using helper function (without patcher to avoid double logging)
+    perplexity_result = compute_perplexity_from_texts(
+        model, tokenizer, texts, max_length=max_length, device=device
+    )
+
     return {
-        # Primary accuracy (raw - for backward compatibility)
+        # Primary metrics
         'accuracy': accuracy_raw,
+        'perplexity': perplexity_result['perplexity'],  # NEW
+        'avg_loss': perplexity_result['avg_loss'],  # NEW
+
+        # Accuracy details
         'correct': correct,
         'total': total,
 
@@ -657,6 +969,10 @@ def evaluate_hellaswag(
         # Length-normalized scoring (recommended, fairer comparison)
         'accuracy_normalized': accuracy_normalized,
         'correct_normalized': correct_normalized,
+
+        # Perplexity details (NEW)
+        'total_tokens': perplexity_result['total_tokens'],
+        'num_samples': perplexity_result['num_samples'],
 
         # Data
         'predictions': predictions,
@@ -714,6 +1030,7 @@ def evaluate_all_datasets(
         model, tokenizer, wikitext_data, patcher, device=device
     )
     print(f"  ✓ Perplexity: {results['wikitext']['perplexity']:.2f}")
+    print(f"  ✓ Accuracy: {results['wikitext']['accuracy']:.4f}")  # NEW
 
     # LAMBADA
     print("\n[2/3] LAMBADA...")
@@ -722,6 +1039,7 @@ def evaluate_all_datasets(
         model, tokenizer, lambada_data, patcher, device=device
     )
     print(f"  ✓ Accuracy: {results['lambada']['accuracy']:.4f}")
+    print(f"  ✓ Perplexity: {results['lambada']['perplexity']:.2f}")  # NEW
 
     # HellaSwag
     print("\n[3/3] HellaSwag...")
@@ -730,6 +1048,7 @@ def evaluate_all_datasets(
         model, tokenizer, hellaswag_data, patcher, device=device
     )
     print(f"  ✓ Accuracy: {results['hellaswag']['accuracy']:.4f}")
+    print(f"  ✓ Perplexity: {results['hellaswag']['perplexity']:.2f}")  # NEW
 
     print("\n" + "=" * 70)
     print("EVALUATION COMPLETE")

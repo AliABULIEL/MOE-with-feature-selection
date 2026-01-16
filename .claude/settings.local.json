@@ -21,7 +21,8 @@
       "Bash(test:*)",
       "Bash(.venv/bin/pip:*)",
       "Bash(python test_weight_computation.py:*)",
-      "Bash(python test_patch_mode.py:*)"
+      "Bash(python test_patch_mode.py:*)",
+      "Bash(python test_all_metrics.py:*)"
     ],
     "deny": [],
     "ask": []
