@@ -44,7 +44,7 @@ class RouterLogger:
         self.hooks = []
         self.routing_data = []
         self.num_experts = getattr(model.config, "num_experts", 128)
-        self.top_k = 8
+        self.top_k = getattr(model.config, "num_experts_per_tok", 8)
 
     def register_hooks(self, top_k: int = 8):
         """
