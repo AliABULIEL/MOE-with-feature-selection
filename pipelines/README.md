@@ -1,169 +1,61 @@
 # MoE Router Analysis Pipelines
 
-End-to-end pipelines for analyzing Mixture-of-Experts (MoE) router behavior in DeepSeek-V2-Lite and Qwen3-30B-A3B models.
+End-to-end pipelines for analyzing Mixture-of-Experts (MoE) router behavior.
 
 ## Overview
 
-These pipelines capture internal router logits during inference, train KDE models to estimate probability distributions, and generate comprehensive visualizations for analyzing expert selection patterns.
+These pipelines **use the existing `RouterLogger` classes** from your PR files:
+- `run_deepseek_pipeline.py` → imports from `moe_internal_logging_deepseek.py`
+- `run_qwen_pipeline.py` → imports from `moe_internal_logging_qwen.py`
 
-## Scripts
+## What Each Stage Does
 
-| Script | Model | Experts | Top-K |
-|--------|-------|---------|-------|
-| `run_deepseek_pipeline.py` | DeepSeek-V2-Lite | 64 | 6 |
-| `run_qwen_pipeline.py` | Qwen3-30B-A3B | 128 | 8 |
+| Stage | What It Does | Equivalent in logs_eda.ipynb |
+|-------|--------------|------------------------------|
+| **Stage 1: Evaluation** | Load model, run inference, capture router logits using `RouterLogger` hooks, save JSON | JSON files are the **input** to logs_eda.ipynb |
+| **Stage 2: KDE Training** | Load JSON, extract `router_logits_sample`, train `gaussian_kde` per layer, save `.pkl` | `gaussian_kde(train_data.T)` + `pickle.dump` cells |
+| **Stage 3: Basic Plots** | Expert weight sums, choice counts, softmax/raw logit distributions | First half of notebook |
+| **Stage 4: Per-Expert Plots** | Distribution per (layer × expert) combination | `softmax_router_logits_per_expert` loops |
+| **Stage 5: KDE Plots** | Cumulative density, trimmed comparisons, kernel comparisons | KDE and trimming cells |
+| **Stage 6: P-Value Plots** | P-value distributions, vs uniform, by k-th best expert, by popularity | P-value cells at the end |
 
-## Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-**Note:** Requires `transformers>=4.57.0` for Qwen3 support.
-
-## Usage
-
-### Basic Usage
-
-```bash
-# Run DeepSeek pipeline
-python run_deepseek_pipeline.py
-
-# Run Qwen pipeline
-python run_qwen_pipeline.py
-```
-
-### Configuration
-
-Each script has a `CONFIG` dictionary at the top that can be modified:
-
-```python
-CONFIG = {
-    # Model Configuration
-    "model_id": "deepseek-ai/DeepSeek-V2-Lite",
-    "model_name": "deepseek",
-    "num_experts": 64,
-    "default_top_k": 6,
-    
-    # Dataset Configuration
-    "datasets": ["lambada", "hellaswag", "wikitext"],
-    "max_samples": {
-        "lambada": 500,
-        "hellaswag": 500,
-        "wikitext": 300,
-    },
-    
-    # Pipeline Stage Toggles
-    "run_evaluation": True,      # Stage 1: Run model on datasets
-    "run_kde_training": True,    # Stage 2: Train KDE models
-    "run_basic_plots": True,     # Stage 3: Summary plots
-    "run_per_expert_plots": True,# Stage 4: Per-expert plots (many!)
-    "run_kde_plots": True,       # Stage 5: KDE analysis plots
-    "run_pvalue_plots": True,    # Stage 6: P-value distribution plots
-    
-    # Hardware Configuration
-    "device": "cuda",
-    "dtype": "bfloat16",
-}
-```
-
-### Quick Testing
-
-For quick testing with fewer samples:
-
-```python
-def main():
-    config = CONFIG.copy()
-    
-    # Override for quick testing
-    config["max_samples"] = {"lambada": 50, "hellaswag": 50, "wikitext": 30}
-    config["run_per_expert_plots"] = False  # Skip the many per-expert plots
-    
-    run_pipeline(config)
-```
-
-## Pipeline Stages
-
-### Stage 1: Model Evaluation with Internal Logging
-- Loads the model and tokenizer
-- Registers forward hooks on router gates
-- Runs inference on LAMBADA, HellaSwag, and WikiText datasets
-- Captures full router logits (all experts) for each token
-- Saves JSON logs with routing data
-
-### Stage 2: KDE Model Training
-- Trains Gaussian KDE models per layer using LAMBADA data
-- Creates CDF lookup tables for p-value computation
-- Trains trimmed variants (removing top/bottom 1, 2, 4 experts)
-- Trains with multiple kernels (gaussian, tophat, epanechnikov, linear)
-
-### Stage 3: Basic Plots
-- Expert weight sum distributions per layer
-- Expert choice count bar plots
-- Router softmax output distributions
-- Raw router logit distributions
-
-### Stage 4: Per-Expert Plots (Optional)
-- Per-layer, per-expert softmax distributions
-- Per-layer, per-expert raw logit distributions
-- **Warning:** Generates many plots (DeepSeek: ~3,500, Qwen: ~12,500)
-
-### Stage 5: KDE Analysis Plots
-- KDE cumulative density histograms
-- Trimmed logit comparisons (train vs test datasets)
-- Kernel comparison plots
-
-### Stage 6: P-Value Distribution Plots
-- Basic p-value distributions per layer
-- P-value vs uniform distribution comparisons
-- P-value by k-th best expert
-- P-value by expert popularity (most chosen to least chosen)
-
-## Output Structure
+## Data Flow
 
 ```
-outputs/
-├── deepseek/
-│   ├── logs/
-│   │   ├── deepseek_lambada_internal_routing.json
-│   │   ├── deepseek_hellaswag_internal_routing.json
-│   │   └── deepseek_wikitext_internal_routing.json
-│   ├── kde_models/
-│   │   ├── deepseek_distribution_model_layer_0.pkl
-│   │   ├── deepseek_distribution_model_layer_0_trimmed_2.pkl
-│   │   ├── deepseek_distribution_model_layer_0_gaussian.pkl
-│   │   └── ...
-│   └── plots/
-│       ├── basic/
-│       │   ├── expert_weights_sum/
-│       │   ├── expert_choice_counts/
-│       │   ├── router_softmax/
-│       │   └── router_raw_logits/
-│       ├── per_expert/
-│       │   ├── per_expert_softmax/
-│       │   └── per_expert_raw_logits/
-│       ├── kde/
-│       │   ├── kde_cumulative_density/
-│       │   ├── trimmed_comparison/
-│       │   └── kernel_comparison/
-│       └── pvalue/
-│           ├── pvalue_basic/
-│           ├── pvalue_vs_uniform/
-│           └── pvalue_by_popularity/
-│
-└── qwen/
-    └── ... (same structure)
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGE 1: Evaluation with Internal Routing Logging               │
+│ Uses: RouterLogger from moe_internal_logging_{model}.py         │
+├─────────────────────────────────────────────────────────────────┤
+│ Input:  Model + Datasets (LAMBADA, HellaSwag, WikiText)         │
+│ Output: JSON files with router_logits_sample for ALL experts    │
+│         {model}_{dataset}_internal_routing.json                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGE 2: KDE Model Training                                      │
+├─────────────────────────────────────────────────────────────────┤
+│ Input:  JSON from LAMBADA (training dataset)                    │
+│ Output: KDE models per layer                                    │
+│         {model}_distribution_model_layer_{i}.pkl                │
+│         {model}_distribution_model_layer_{i}_trimmed_{k}.pkl    │
+│         {model}_distribution_model_layer_{i}_{kernel}.pkl       │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGES 3-6: Visualization                                        │
+├─────────────────────────────────────────────────────────────────┤
+│ Input:  JSON logs + KDE models                                  │
+│ Output: All the plots from logs_eda.ipynb                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## JSON Log Format
+## JSON Format (Compatible with logs_eda.ipynb)
 
 ```json
 {
   "config": "deepseek-ai/DeepSeek-V2-Lite",
   "strategy": "topk_baseline",
   "num_experts": 64,
-  "top_k": 6,
-  "dataset": "lambada",
   "num_layers": 27,
   "samples": [
     {
@@ -174,9 +66,9 @@ outputs/
         {
           "layer": 0,
           "router_logits_shape": [45, 64],
-          "router_logits_sample": [[...], ...],  // All 64 experts
-          "selected_experts": [[12, 5, 33, 8, 41, 2], ...],  // Top-6
-          "expert_weights": [[0.18, 0.15, ...], ...]  // Top-6 weights
+          "router_logits_sample": [[...], ...],  // ← ALL 64 experts (critical for KDE)
+          "selected_experts": [[12, 5, 33, 8, 41, 2], ...],
+          "expert_weights": [[0.18, 0.15, ...], ...]
         }
       ]
     }
@@ -184,44 +76,70 @@ outputs/
 }
 ```
 
-## Hardware Requirements
+The key field is `router_logits_sample` which contains the **raw logits for ALL experts** (not just top-k). This is what the KDE models are trained on.
 
-| Model | VRAM Required |
-|-------|---------------|
-| DeepSeek-V2-Lite | ~40GB |
-| Qwen3-30B-A3B | ~60GB |
+## Usage
 
-Both models work well on A100 (80GB).
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
-## Estimated Runtime
+# Run pipelines
+python run_deepseek_pipeline.py
+python run_qwen_pipeline.py
+```
 
-| Stage | DeepSeek | Qwen |
-|-------|----------|------|
-| Model Loading | ~2 min | ~5 min |
-| Dataset Evaluation | ~30 min | ~60 min |
-| KDE Training | ~5 min | ~10 min |
-| Plot Generation | ~30 min | ~60 min |
-| **Total** | **~1 hour** | **~2.5 hours** |
+## Configuration
 
-## Model-Specific Details
+Edit the `CONFIG` dict at the top of each script:
 
-### DeepSeek-V2-Lite
-- Router gate location: `model.layers[i].mlp.gate` (nn.Linear)
-- Logit computation: `F.linear(hidden_states, gate.weight)`
-- 27 MoE layers, 64 experts per layer
+```python
+CONFIG = {
+    # Toggle stages
+    "run_evaluation": True,       # Stage 1
+    "run_kde_training": True,     # Stage 2
+    "run_basic_plots": True,      # Stage 3
+    "run_per_expert_plots": True, # Stage 4 (many plots!)
+    "run_kde_plots": True,        # Stage 5
+    "run_pvalue_plots": True,     # Stage 6
+    
+    # Sample counts
+    "max_samples": {
+        "lambada": 500,
+        "hellaswag": 500,
+        "wikitext": 300,
+    },
+}
+```
 
-### Qwen3-30B-A3B
-- Router gate location: `model.layers[i].mlp.gate` (inside MoE block)
-- Logit computation: `mlp.gate(hidden_states.view(-1, hidden_dim))`
-- 48 MoE layers, 128 experts per layer
+## Quick Test
 
-## Compatibility with logs_eda.ipynb
+```python
+def main():
+    config = CONFIG.copy()
+    config["max_samples"] = {"lambada": 50, "hellaswag": 50, "wikitext": 30}
+    config["run_per_expert_plots"] = False  # Skip 3000+ plots
+    run_pipeline(config)
+```
 
-The JSON format produced by these pipelines is compatible with the `logs_eda.ipynb` notebook. The key fields are:
-- `router_logits_sample`: Full router logits for all experts (used for KDE training)
-- `selected_experts`: Top-k selected expert indices
-- `expert_weights`: Top-k expert weights (post-softmax)
+## Model Specifications
 
-## License
+| Model | Script | RouterLogger Source | Experts | Hook Location |
+|-------|--------|---------------------|---------|---------------|
+| DeepSeek-V2-Lite | `run_deepseek_pipeline.py` | `moe_internal_logging_deepseek.py` | 64 | `layer.mlp.gate` |
+| Qwen3-30B-A3B | `run_qwen_pipeline.py` | `moe_internal_logging_qwen.py` | 128 | `layer.mlp` → `module.gate()` |
 
-MIT License
+
+
+# 1. Clone your repo
+git clone <your-repo-url>
+cd MOE-with-feature-selection
+
+# 2. Install dependencies
+pip install -r pipelines/requirements.txt
+
+# 3. Run DeepSeek pipeline
+python pipelines/run_deepseek_pipeline.py
+
+# 4. Run Qwen pipeline  
+python pipelines/run_qwen_pipeline.py

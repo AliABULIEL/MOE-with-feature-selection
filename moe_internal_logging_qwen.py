@@ -125,7 +125,7 @@ class RouterLogger:
                     if hasattr(self.model.config, "norm_topk_prob")
                     else False
                 )
-                hook = layer.mlp.register_forward_hook(create_hook(i), norm_top_k)
+                hook = layer.mlp.register_forward_hook(create_hook(i, norm_top_k))
                 self.hooks.append(hook)
         print(f"✅ Registered {len(self.hooks)} router hooks (top_k={top_k})")
 
