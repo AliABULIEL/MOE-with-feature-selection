@@ -157,7 +157,7 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
     
     tokenizer = AutoTokenizer.from_pretrained(
         config["model_id"],
-        trust_remote_code=True
+        # trust_remote_code=True
     )
     
     if tokenizer.pad_token is None:
@@ -167,7 +167,7 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
         config["model_id"],
         torch_dtype=get_torch_dtype(config["dtype"]),
         device_map="auto",
-        trust_remote_code=True
+        # trust_remote_code=True
     )
     model.eval()
     
