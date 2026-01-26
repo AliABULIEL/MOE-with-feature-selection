@@ -199,27 +199,27 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
         except:
             dataset = load_dataset("EleutherAI/lambada_openai", "en", split="test")
         samples = [
-            {"text": item.get("text", "")}
+            {"text": item.get("text", "")} # type: ignore
             for item in dataset
-            if item.get("text", "").strip()
+            if item.get("text", "").strip() # type: ignore
         ]
     elif dataset_name == "hellaswag":
         dataset = load_dataset("hellaswag", split="validation")
         samples = []
         for item in dataset:
             ctx, endings, label = (
-                item.get("ctx", ""),
-                item.get("endings", []),
-                int(item.get("label", 0)),
+                item.get("ctx", ""), # type: ignore
+                item.get("endings", []), # type: ignore
+                int(item.get("label", 0)), # type: ignore
             )
             if ctx and endings and 0 <= label < len(endings):
                 samples.append({"text": f"{ctx} {endings[label]}"})
     elif dataset_name == "wikitext":
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         samples = [
-            {"text": item.get("text", "")}
+            {"text": item.get("text", "")} # type: ignore
             for item in dataset
-            if item.get("text", "").strip() and len(item.get("text", "").split()) > 10
+            if item.get("text", "").strip() and len(item.get("text", "").split()) > 10 # type: ignore
         ]
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")

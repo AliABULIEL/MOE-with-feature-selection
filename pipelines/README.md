@@ -85,25 +85,23 @@ The key field is `router_logits_sample` which contains the **raw logits for ALL 
 pip install -r requirements.txt
 
 # Run pipelines
-python run_deepseek_pipeline.py
-python run_qwen_pipeline.py
+python run_deepseek_pipeline.py config_deepseek_baseline.json
+python run_qwen_pipeline.py config_qwen_baseline.json
 ```
 
 ## Configuration
 
-Edit the `CONFIG` dict at the top of each script:
+Create a json file in `pipelines/configs` with the following items:
 
-```python
-CONFIG = {
-    # Toggle stages
-    "run_evaluation": True,       # Stage 1
-    "run_kde_training": True,     # Stage 2
-    "run_basic_plots": True,      # Stage 3
-    "run_per_expert_plots": True, # Stage 4 (many plots!)
-    "run_kde_plots": True,        # Stage 5
-    "run_pvalue_plots": True,     # Stage 6
+```json
+{
+    "run_evaluation": true,
+    "run_kde_training": true,
+    "run_basic_plots": true,
+    "run_per_expert_plots": true,
+    "run_kde_plots": true,
+    "run_pvalue_plots": true,
     
-    # Sample counts
     "max_samples": {
         "lambada": 500,
         "hellaswag": 500,
@@ -116,7 +114,10 @@ CONFIG = {
 
 ```python
 def main():
-    config = CONFIG.copy()
+    if len(sys.argv) != 2:
+        print("Usage: python run_qwen_pipeline.py <config_file.json>")
+        sys.exit(1)
+    config = load_config_from_file(sys.argv[1])
     config["max_samples"] = {"lambada": 50, "hellaswag": 50, "wikitext": 30}
     config["run_per_expert_plots"] = False  # Skip 3000+ plots
     run_pipeline(config)
@@ -124,10 +125,10 @@ def main():
 
 ## Model Specifications
 
-| Model | Script | RouterLogger Source | Experts | Hook Location |
-|-------|--------|---------------------|---------|---------------|
-| DeepSeek-V2-Lite | `run_deepseek_pipeline.py` | `moe_internal_logging_deepseek.py` | 64 | `layer.mlp.gate` |
-| Qwen3-30B-A3B | `run_qwen_pipeline.py` | `moe_internal_logging_qwen.py` | 128 | `layer.mlp` → `module.gate()` |
+| Model | Script | RouterLogger Source | Experts | Hook Location | Baseline Config |
+|-------|--------|---------------------|---------|---------------|-----------------|
+| DeepSeek-V2-Lite | `run_deepseek_pipeline.py` | `moe_internal_logging_deepseek.py` | 64 | `layer.mlp.gate` | `config_deepseek_baseline.json`
+| Qwen3-30B-A3B | `run_qwen_pipeline.py` | `moe_internal_logging_qwen.py` | 128 | `layer.mlp` → `module.gate()` | `config_qwen_baseline.json`
 
 
 
@@ -139,7 +140,7 @@ cd MOE-with-feature-selection
 pip install -r pipelines/requirements.txt
 
 # 3. Run DeepSeek pipeline
-python pipelines/run_deepseek_pipeline.py
+python pipelines/run_deepseek_pipeline.py config_deepseek_baseline.json
 
 # 4. Run Qwen pipeline  
-python pipelines/run_qwen_pipeline.py
+python pipelines/run_qwen_pipeline.py config_qwen_baseline.json

@@ -213,7 +213,7 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
         samples = []
         for item in dataset:
-            text = item.get("text", "")
+            text = item.get("text", "") # type: ignore
             if text.strip():
                 samples.append(
                     {"text": text, "target": text.split()[-1] if text else ""}
@@ -226,9 +226,9 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
         samples = []
         for item in dataset:
-            ctx = item.get("ctx", "")
-            endings = item.get("endings", [])
-            label = int(item.get("label", 0))
+            ctx = item.get("ctx", "") # type: ignore
+            endings = item.get("endings", []) # type: ignore
+            label = int(item.get("label", 0)) # type: ignore
 
             if ctx and endings and 0 <= label < len(endings):
                 samples.append(
@@ -247,7 +247,7 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
         samples = []
         for item in dataset:
-            text = item.get("text", "")
+            text = item.get("text", "") # type: ignore
             if text.strip() and len(text.split()) > 10:
                 samples.append({"text": text})
             if len(samples) >= max_samples:
