@@ -1,0 +1,35 @@
+{
+    "model_id": "Qwen/Qwen3-30B-A3B",
+    "model_name": "qwen",
+    "num_experts": 128,
+    "default_top_k": 8,   
+    
+    "datasets": ["lambada", "hellaswag", "wikitext"],
+    "max_samples": {
+        "lambada": 5,
+        "hellaswag": 5,
+        "wikitext": 3
+    },
+    "max_length": 512,
+    
+    "kde_train_dataset": "lambada",
+    "kde_test_datasets": ["hellaswag", "wikitext"],
+    "kde_trim_amounts": [0, 1, 2, 4],
+    "kde_kernels": ["gaussian", "tophat", "epanechnikov", "linear"],
+    
+    "output_dir": "./outputs/qwen",
+    
+    "run_evaluation": true,
+    "run_kde_training": true,
+    "run_basic_plots": true,
+    "run_per_expert_plots": false,
+    "run_kde_plots": false,
+    "run_pvalue_plots": false,
+    
+    "device": "cuda",
+    "dtype": "bfloat16",
+    
+    "plot_format": "png",
+    "plot_dpi": 100,
+    "show_plots": false
+}
