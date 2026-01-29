@@ -1,22 +1,12 @@
 """
-MoE Internal Router Logging for Qwen3 MoE Models
-=================================================
+MoE Internal Router Logging (Shared by BH & HC)
+================================================
 
 Captures internal router outputs using forward hooks.
 Works with any routing strategy (BH, HC, TopK baseline).
 
-IMPORTANT: This version hooks on layer.mlp.gate (the router's Linear layer)
-NOT on layer.mlp (the entire MoE block which returns a tuple).
-
-Architecture:
-    Qwen3 MoE structure:
-        layer.mlp = Qwen3MoeSparseMoeBlock
-            ├── gate = nn.Linear(hidden_size, num_experts)  # Router - HOOK HERE
-            ├── experts = ModuleList[Qwen3MoeMLP, ...]
-            └── shared_expert = Qwen3MoeMLP (optional)
-
 Usage:
-    from moe_internal_logging_qwen import RouterLogger, InternalRoutingLogger
+    from moe_internal_logging import RouterLogger, InternalRoutingLogger
 
     # Per-sample logging
     logger = RouterLogger(model)
@@ -48,7 +38,7 @@ class RouterLogger:
         Initialize router logger.
 
         Args:
-            model: Qwen3-30B-A3B model instance (or similar Qwen MoE model)
+            model: Qwen3-30B-A2B model instance
         """
         self.model = model
         self.hooks = []
@@ -72,23 +62,12 @@ class RouterLogger:
                 hidden_states = input[0]
 
                 # Manually compute pre-softmax logits: hidden_states @ weight.T
-                # We use the module's weight parameter (same approach as DeepSeek)
+                # We use the module's weight parameter
                 try:
                     with torch.no_grad():
-                        # Flatten if needed (handle both 2D and 3D inputs)
-                        if hidden_states.dim() == 3:
-                            batch_size, sequence_length, hidden_dim = hidden_states.shape
-                            hidden_states = hidden_states.view(-1, hidden_dim)
-
-                        # Compute router logits using the gate's weight matrix
-                        if hasattr(module, "weight"):
-                            router_logits = F.linear(
-                                hidden_states.to(torch.float32),
-                                module.weight.to(torch.float32),
-                            )
-                        else:
-                            print(f"Warning: Layer {layer_idx} gate has no 'weight' attribute.")
-                            return
+                        batch_size, sequence_length, hidden_dim = hidden_states.shape
+                        hidden_states = hidden_states.view(-1, hidden_dim)
+                        router_logits = module.gate(hidden_states)
 
                         # Compute softmax probabilities
                         probs = F.softmax(router_logits, dim=-1, dtype=torch.float32)
@@ -139,20 +118,15 @@ class RouterLogger:
 
             return hook_fn
 
-        # Register hooks on each layer's gate (the router's Linear layer)
-        # CRITICAL: Hook on layer.mlp.gate, NOT layer.mlp (which returns a tuple)
         for i, layer in enumerate(self.model.model.layers):
-            if hasattr(layer, "mlp") and hasattr(layer.mlp, "gate"):
+            if hasattr(layer, "mlp"):
                 norm_top_k = (
                     self.model.config.norm_topk_prob
                     if hasattr(self.model.config, "norm_topk_prob")
                     else False
                 )
-                # Register hook on layer.mlp.gate (the router's Linear layer)
-                # NOT on layer.mlp (the entire MoE block which returns a tuple)
-                hook = layer.mlp.gate.register_forward_hook(create_hook(i, norm_top_k))
+                hook = layer.mlp.register_forward_hook(create_hook(i, norm_top_k))
                 self.hooks.append(hook)
-        
         print(f"✅ Registered {len(self.hooks)} router hooks (top_k={top_k})")
 
     def get_routing_data(self) -> List[Dict]:
@@ -199,7 +173,6 @@ class RouterLogger:
         """Remove all registered hooks."""
         for hook in self.hooks:
             hook.remove()
-        self.hooks = []
 
 
 class InternalRoutingLogger:
@@ -346,7 +319,7 @@ class InternalRoutingLogger:
             "layer_entropies": layer_entropies,
             "layer_concentrations": layer_concentrations,
             "unique_experts": len(self.expert_usage_counts),
-            "expert_utilization": len(self.expert_usage_counts) / 128,  # Qwen has 128 experts
+            "expert_utilization": len(self.expert_usage_counts) / 64,
             "most_used_experts": sorted(
                 self.expert_usage_counts.items(), key=lambda x: x[1], reverse=True
             )[:10],
