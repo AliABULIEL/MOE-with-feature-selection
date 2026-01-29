@@ -3,7 +3,7 @@
 
 # Core ML/Deep Learning
 torch>=2.0.0
-transformers>=4.57.0  # Required for Qwen3 support
+transformers~=4.57.0  # Required for Qwen3 support
 
 # Data handling
 datasets>=2.14.0
