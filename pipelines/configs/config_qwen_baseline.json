@@ -1,8 +1,8 @@
 {
-    "model_id": "deepseek-ai/DeepSeek-V2-Lite",
-    "model_name": "deepseek",
-    "num_experts": 64,
-    "default_top_k": 6,   
+    "model_id": "Qwen/Qwen3-30B-A3B",
+    "model_name": "qwen",
+    "num_experts": 128,
+    "default_top_k": 8,   
     
     "datasets": ["lambada", "hellaswag", "wikitext"],
     "max_samples": {
@@ -17,7 +17,7 @@
     "kde_trim_amounts": [0, 1, 2, 4],
     "kde_kernels": ["gaussian", "tophat", "epanechnikov", "linear"],
     
-    "output_dir": "./outputs/deepseek",
+    "output_dir": "./outputs/qwen",
     
     "run_evaluation": true,
     "run_kde_training": true,
