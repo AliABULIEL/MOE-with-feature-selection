@@ -38,7 +38,7 @@ class RouterLogger:
         Initialize router logger.
 
         Args:
-            model: Qwen3-30B-A2B model instance
+            model: Qwen3-30B-A3B model instance
         """
         self.model = model
         self.hooks = []
@@ -319,7 +319,7 @@ class InternalRoutingLogger:
             "layer_entropies": layer_entropies,
             "layer_concentrations": layer_concentrations,
             "unique_experts": len(self.expert_usage_counts),
-            "expert_utilization": len(self.expert_usage_counts) / 64,
+            "expert_utilization": len(self.expert_usage_counts) / 128,
             "most_used_experts": sorted(
                 self.expert_usage_counts.items(), key=lambda x: x[1], reverse=True
             )[:10],

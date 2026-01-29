@@ -73,6 +73,9 @@ class RouterLogger:
                         else:
                             print(f"Warning: {layer_idx} has no 'weight' attribute.")
 
+                        # Check shape of router_logits, if it's [1, n, m], squeeze
+                        if router_logits.dim() == 3 and router_logits.shape[0] == 1:
+                            router_logits = router_logits.squeeze(0)
                         # Compute softmax probabilities
                         probs = F.softmax(router_logits, dim=-1, dtype=torch.float32)
 
