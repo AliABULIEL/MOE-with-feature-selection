@@ -51,55 +51,49 @@ from moe_internal_logging_deepseek import RouterLogger, InternalRoutingLogger
 # ==============================================================================
 
 """
-CONFIG definition example:
+CONFIG definition example (save as JSON file in configs/ directory):
 {
-    # Model Configuration
     "model_id": "deepseek-ai/DeepSeek-V2-Lite",
     "model_name": "deepseek",
     "num_experts": 64,
     "default_top_k": 6,
     
-    # Dataset Configuration
     "datasets": ["lambada", "hellaswag", "wikitext"],
     "max_samples": {
         "lambada": 500,
         "hellaswag": 500,
-        "wikitext": 300,
+        "wikitext": 300
     },
     "max_length": 512,
     
-    # KDE Configuration
     "kde_train_dataset": "lambada",
     "kde_test_datasets": ["hellaswag", "wikitext"],
     "kde_trim_amounts": [0, 1, 2, 4],
     "kde_kernels": ["gaussian", "tophat", "epanechnikov", "linear"],
     
-    # Output Configuration
     "output_dir": "./outputs/deepseek",
     
-    # Pipeline Stage Toggles
-    "run_evaluation": True,
-    "run_kde_training": True,
-    "run_basic_plots": True,
-    "run_per_expert_plots": True,
-    "run_kde_plots": True,
-    "run_pvalue_plots": True,
+    "run_evaluation": true,
+    "run_kde_training": true,
+    "run_basic_plots": true,
+    "run_per_expert_plots": true,
+    "run_kde_plots": true,
+    "run_pvalue_plots": true,
     
-    # Hardware Configuration
     "device": "cuda",
     "dtype": "bfloat16",
     
-    # Plot Configuration
     "plot_format": "png",
     "plot_dpi": 100,
-    "show_plots": False,
+    "show_plots": false
 }
 """
 
 
 def load_config_from_file(config_path: str) -> Dict:
+    """Load configuration from JSON file."""
     CONFIG_FILE = os.path.join(Path(__file__).parent, "configs", config_path)
-    if not os.path.exists(CONFIG_FILE) and CONFIG_FILE.endswith(".json"):
+    if not os.path.exists(CONFIG_FILE):
         raise FileNotFoundError(f"Config file not found: {CONFIG_FILE}")
     with open(CONFIG_FILE, "r") as f:
         CONFIG = json.load(f)
@@ -113,7 +107,6 @@ def load_config_from_file(config_path: str) -> Dict:
 # ==============================================================================
 # UTILITY FUNCTIONS
 # ==============================================================================
-
 
 def setup_directories(config: Dict) -> Dict[str, Path]:
     """Create output directory structure."""
@@ -144,9 +137,8 @@ def get_torch_dtype(dtype_str: str) -> torch.dtype:
 
 def save_plot(fig, path: Path, config: Dict, close: bool = True):
     """Save plot to file."""
-    fig.savefig(
-        path, format=config["plot_format"], dpi=config["plot_dpi"], bbox_inches="tight"
-    )
+    fig.savefig(path, format=config["plot_format"], dpi=config["plot_dpi"],
+                bbox_inches='tight')
     if config["show_plots"]:
         plt.show()
     if close:
@@ -156,16 +148,15 @@ def save_plot(fig, path: Path, config: Dict, close: bool = True):
 def get_ordinal(n: int) -> str:
     """Get ordinal string for a number (1st, 2nd, 3rd, etc.)."""
     if 10 <= n % 100 <= 20:
-        suffix = "th"
+        suffix = 'th'
     else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
     return f"{n}{suffix}"
 
 
 # ==============================================================================
 # STAGE 1: MODEL LOADING
 # ==============================================================================
-
 
 def load_model(config: Dict) -> Tuple[Any, Any]:
     """Load DeepSeek-V2-Lite model and tokenizer."""
@@ -176,7 +167,7 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
 
     tokenizer = AutoTokenizer.from_pretrained(
         config["model_id"],
-        # trust_remote_code=True
+        trust_remote_code=True
     )
 
     if tokenizer.pad_token is None:
@@ -186,7 +177,7 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
         config["model_id"],
         torch_dtype=get_torch_dtype(config["dtype"]),
         device_map="auto",
-        # trust_remote_code=True
+        trust_remote_code=True
     )
     model.eval()
 
@@ -197,7 +188,6 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
 # ==============================================================================
 # STAGE 1B: DATASET LOADING
 # ==============================================================================
-
 
 def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
     """Load dataset samples."""
@@ -213,11 +203,9 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
         samples = []
         for item in dataset:
-            text = item.get("text", "") # type: ignore
+            text = item.get('text', '')
             if text.strip():
-                samples.append(
-                    {"text": text, "target": text.split()[-1] if text else ""}
-                )
+                samples.append({"text": text, "target": text.split()[-1] if text else ""})
             if len(samples) >= max_samples:
                 break
 
@@ -226,19 +214,17 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
         samples = []
         for item in dataset:
-            ctx = item.get("ctx", "") # type: ignore
-            endings = item.get("endings", []) # type: ignore
-            label = int(item.get("label", 0)) # type: ignore
+            ctx = item.get('ctx', '')
+            endings = item.get('endings', [])
+            label = int(item.get('label', 0))
 
             if ctx and endings and 0 <= label < len(endings):
-                samples.append(
-                    {
-                        "ctx": ctx,
-                        "endings": endings,
-                        "label": label,
-                        "text": f"{ctx} {endings[label]}",
-                    }
-                )
+                samples.append({
+                    "ctx": ctx,
+                    "endings": endings,
+                    "label": label,
+                    "text": f"{ctx} {endings[label]}"
+                })
             if len(samples) >= max_samples:
                 break
 
@@ -247,7 +233,7 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
         samples = []
         for item in dataset:
-            text = item.get("text", "") # type: ignore
+            text = item.get('text', '')
             if text.strip() and len(text.split()) > 10:
                 samples.append({"text": text})
             if len(samples) >= max_samples:
@@ -263,14 +249,13 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 # STAGE 1C: EVALUATION WITH LOGGING (USES YOUR RouterLogger)
 # ==============================================================================
 
-
 def run_evaluation(
-    model,
-    tokenizer,
-    samples: List[Dict],
-    dataset_name: str,
-    config: Dict,
-    output_dir: Path,
+        model,
+        tokenizer,
+        samples: List[Dict],
+        dataset_name: str,
+        config: Dict,
+        output_dir: Path
 ) -> Tuple[Dict[str, Any], Path]:
     """
     Run evaluation on dataset with internal routing logging.
@@ -279,9 +264,9 @@ def run_evaluation(
     router logits during inference.
     """
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Evaluating on {dataset_name.upper()}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     device = config["device"]
     max_length = config["max_length"]
@@ -307,7 +292,7 @@ def run_evaluation(
                 return_tensors="pt",
                 truncation=True,
                 max_length=max_length,
-                padding=False,
+                padding=False
             )
             input_ids = inputs["input_ids"].to(device)
 
@@ -330,7 +315,7 @@ def run_evaluation(
                 "sample_id": i,
                 "num_tokens": num_tokens,
                 "loss": loss,
-                "layers": [],
+                "layers": []
             }
 
             for layer_data in routing_data:
@@ -339,9 +324,7 @@ def run_evaluation(
                     "router_logits_shape": list(layer_data["router_logits"].shape),
                     "selected_experts": layer_data["expert_indices"].numpy().tolist(),
                     "expert_weights": layer_data["expert_weights"].numpy().tolist(),
-                    "router_logits_sample": layer_data["router_logits"]
-                    .numpy()
-                    .tolist(),
+                    "router_logits_sample": layer_data["router_logits"].numpy().tolist(),
                 }
                 sample_data["layers"].append(layer_entry)
 
@@ -352,7 +335,7 @@ def run_evaluation(
     router_logger.remove_hooks()
 
     # Compute metrics
-    avg_loss = total_loss / total_tokens if total_tokens > 0 else float("inf")
+    avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
     perplexity = float(np.exp(avg_loss))
 
     # Save in logs_eda.ipynb expected format
@@ -365,13 +348,11 @@ def run_evaluation(
         "max_samples": config["max_samples"].get(dataset_name, 0),
         "timestamp": datetime.now().isoformat(),
         "num_layers": len(all_samples_data[0]["layers"]) if all_samples_data else 0,
-        "samples": all_samples_data,
+        "samples": all_samples_data
     }
 
-    json_path = (
-        output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.json"
-    )
-    with open(json_path, "w") as f:
+    json_path = output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.json"
+    with open(json_path, 'w') as f:
         json.dump(output_data, f, indent=2)
 
     print(f"✅ Evaluation complete")
@@ -384,7 +365,7 @@ def run_evaluation(
         "perplexity": perplexity,
         "avg_loss": avg_loss,
         "total_tokens": total_tokens,
-        "num_samples": len(all_samples_data),
+        "num_samples": len(all_samples_data)
     }, json_path
 
 
@@ -392,10 +373,9 @@ def run_evaluation(
 # STAGE 2: KDE MODEL TRAINING (from logs_eda.ipynb)
 # ==============================================================================
 
-
 def load_routing_data(json_path: Path) -> Dict:
     """Load routing data from JSON file."""
-    with open(json_path, "r") as f:
+    with open(json_path, 'r') as f:
         return json.load(f)
 
 
@@ -420,16 +400,12 @@ def extract_router_logits(data: Dict) -> Tuple[np.ndarray, List, List]:
     for sample in data["samples"]:
         for layer_data in sample["layers"]:
             layer_idx = layer_data["layer"]
-            layers_router_logits_raw[layer_idx].extend(
-                layer_data["router_logits_sample"]
-            )
+            layers_router_logits_raw[layer_idx].extend(layer_data["router_logits_sample"])
             layers_expert_weights[layer_idx].extend(layer_data["expert_weights"])
             layers_expert_choices[layer_idx].extend(layer_data["selected_experts"])
 
     # Convert to numpy arrays
-    layers_router_logits_raw = np.array(
-        [np.array(arr) for arr in layers_router_logits_raw]
-    )
+    layers_router_logits_raw = np.array([np.array(arr) for arr in layers_router_logits_raw])
 
     return layers_router_logits_raw, layers_expert_weights, layers_expert_choices
 
@@ -457,7 +433,10 @@ def trim_top_and_bottom_experts(arr: np.ndarray, trim_amount: int = 2) -> np.nda
 
 
 def train_kde_models(
-    layers_router_logits: np.ndarray, output_dir: Path, model_name: str, config: Dict
+        layers_router_logits: np.ndarray,
+        output_dir: Path,
+        model_name: str,
+        config: Dict
 ) -> Dict[int, Dict]:
     """
     Train KDE models for each layer.
@@ -470,9 +449,9 @@ def train_kde_models(
         pickle.dump({'x': x_grid, 'cdf': cdf_grid}, f)
     """
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("TRAINING KDE MODELS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     kde_models = {}
     num_layers = layers_router_logits.shape[0]
@@ -486,7 +465,9 @@ def train_kde_models(
         # Create evaluation grid
         data_min, data_max = layer_data.min(), layer_data.max()
         x_grid = np.linspace(
-            data_min - 0.2 * abs(data_min), data_max + 0.2 * abs(data_max), 10000
+            data_min - 0.2 * abs(data_min),
+            data_max + 0.2 * abs(data_max),
+            10000
         )
 
         # Compute PDF and CDF
@@ -496,10 +477,8 @@ def train_kde_models(
 
         # Save model
         model_data = {"x": x_grid, "cdf": cdf_grid}
-        model_path = (
-            output_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
-        )
-        with open(model_path, "wb") as f:
+        model_path = output_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
+        with open(model_path, 'wb') as f:
             pickle.dump(model_data, f)
 
         kde_models[layer_idx] = model_data
@@ -510,25 +489,21 @@ def train_kde_models(
                 continue
 
             trimmed_data = trim_top_and_bottom_experts(
-                layers_router_logits[layer_idx][np.newaxis, :, :], trim_amt
+                layers_router_logits[layer_idx][np.newaxis, :, :],
+                trim_amt
             )
             trimmed_flat = trimmed_data.flatten()
 
             kde_trimmed = gaussian_kde(trimmed_flat)
             t_min, t_max = trimmed_flat.min(), trimmed_flat.max()
-            x_grid_t = np.linspace(
-                t_min - 0.2 * abs(t_min), t_max + 0.2 * abs(t_max), 10000
-            )
+            x_grid_t = np.linspace(t_min - 0.2 * abs(t_min), t_max + 0.2 * abs(t_max), 10000)
 
             pdf_t = kde_trimmed.evaluate(x_grid_t)
             cdf_t = np.cumsum(pdf_t)
             cdf_t /= cdf_t[-1]
 
-            model_path_t = (
-                output_dir
-                / f"{model_name}_distribution_model_layer_{layer_idx}_trimmed_{trim_amt*2}.pkl"
-            )
-            with open(model_path_t, "wb") as f:
+            model_path_t = output_dir / f"{model_name}_distribution_model_layer_{layer_idx}_trimmed_{trim_amt * 2}.pkl"
+            with open(model_path_t, 'wb') as f:
                 pickle.dump({"x": x_grid_t, "cdf": cdf_t}, f)
 
         # Train with different kernels (sklearn)
@@ -545,11 +520,8 @@ def train_kde_models(
             cdf_k = np.cumsum(pdf_k)
             cdf_k /= cdf_k[-1]
 
-            model_path_k = (
-                output_dir
-                / f"{model_name}_distribution_model_layer_{layer_idx}_{kernel_type}.pkl"
-            )
-            with open(model_path_k, "wb") as f:
+            model_path_k = output_dir / f"{model_name}_distribution_model_layer_{layer_idx}_{kernel_type}.pkl"
+            with open(model_path_k, 'wb') as f:
                 pickle.dump({"x": x_grid, "cdf": cdf_k}, f)
 
     print(f"✅ Trained KDE models for {num_layers} layers")
@@ -560,15 +532,14 @@ def train_kde_models(
 # STAGE 3: BASIC PLOTS (from logs_eda.ipynb)
 # ==============================================================================
 
-
 def generate_basic_plots(
-    data: Dict,
-    layers_router_logits: np.ndarray,
-    layers_expert_weights: List,
-    layers_expert_choices: List,
-    output_dir: Path,
-    model_name: str,
-    config: Dict,
+        data: Dict,
+        layers_router_logits: np.ndarray,
+        layers_expert_weights: List,
+        layers_expert_choices: List,
+        output_dir: Path,
+        model_name: str,
+        config: Dict
 ):
     """
     Generate basic analysis plots.
@@ -580,12 +551,15 @@ def generate_basic_plots(
     - Raw router logit distributions
     """
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("GENERATING BASIC PLOTS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     num_layers = layers_router_logits.shape[0]
-    num_experts = layers_router_logits.shape[2]
+    # Note: layers_router_logits is an object array of shape (num_layers,)
+    # where each element is a 2D array of shape (num_tokens_in_layer, num_experts)
+    # This happens because different samples have different token counts
+    num_experts = layers_router_logits[0].shape[1]
 
     # Convert expert weights to numpy
     layers_expert_weights_np = [np.array(weights) for weights in layers_expert_weights]
@@ -608,20 +582,14 @@ def generate_basic_plots(
         ax.set_ylabel("Frequency")
         ax.grid(True, alpha=0.3)
 
-        save_plot(
-            fig,
-            weights_sum_dir / f"{model_name}_layer_{layer_idx}_weights_sum.png",
-            config,
-        )
+        save_plot(fig, weights_sum_dir / f"{model_name}_layer_{layer_idx}_weights_sum.png", config)
 
     # Combined weight sum distribution
     combined_weights_sum = np.concatenate(layers_weights_sum)
     fig, ax = plt.subplots(figsize=(10, 6))
     sns.histplot(combined_weights_sum, bins=50, kde=True, ax=ax)
     ax.set_xlim(0, 1)
-    ax.set_title(
-        f"{model_name.upper()} - Distribution of Sum of Expert Weights (All Layers)"
-    )
+    ax.set_title(f"{model_name.upper()} - Distribution of Sum of Expert Weights (All Layers)")
     ax.set_xlabel("Sum of Expert Weights")
     ax.set_ylabel("Frequency")
     ax.grid(True, alpha=0.3)
@@ -634,11 +602,7 @@ def generate_basic_plots(
 
     layers_choice_counts = []
     for layer_idx in tqdm(range(num_layers), desc="Choice count plots"):
-        flat_choices = [
-            exp
-            for token_choices in layers_expert_choices[layer_idx]
-            for exp in token_choices
-        ]
+        flat_choices = [exp for token_choices in layers_expert_choices[layer_idx] for exp in token_choices]
         unique, counts = np.unique(flat_choices, return_counts=True)
         choice_dict = dict(zip(unique, counts))
         layers_choice_counts.append(choice_dict)
@@ -651,11 +615,7 @@ def generate_basic_plots(
         ax.set_xlabel("Expert")
         ax.set_ylabel("Count")
 
-        save_plot(
-            fig,
-            choice_counts_dir / f"{model_name}_layer_{layer_idx}_choice_counts.png",
-            config,
-        )
+        save_plot(fig, choice_counts_dir / f"{model_name}_layer_{layer_idx}_choice_counts.png", config)
 
     # 3. Router softmax distributions per layer
     print("Plotting router softmax distributions...")
@@ -664,9 +624,7 @@ def generate_basic_plots(
 
     for layer_idx in tqdm(range(num_layers), desc="Softmax plots"):
         layer_logits = layers_router_logits[layer_idx]
-        softmax_logits = np.exp(layer_logits) / np.sum(
-            np.exp(layer_logits), axis=1, keepdims=True
-        )
+        softmax_logits = np.exp(layer_logits) / np.sum(np.exp(layer_logits), axis=1, keepdims=True)
         flat_softmax = softmax_logits.flatten()
 
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -676,9 +634,7 @@ def generate_basic_plots(
         ax.set_ylabel("Frequency")
         ax.grid(True, alpha=0.3)
 
-        save_plot(
-            fig, softmax_dir / f"{model_name}_layer_{layer_idx}_softmax.png", config
-        )
+        save_plot(fig, softmax_dir / f"{model_name}_layer_{layer_idx}_softmax.png", config)
 
     # 4. Raw router logit distributions per layer
     print("Plotting raw router logit distributions...")
@@ -695,11 +651,7 @@ def generate_basic_plots(
         ax.set_ylabel("Frequency")
         ax.grid(True, alpha=0.3)
 
-        save_plot(
-            fig,
-            raw_logits_dir / f"{model_name}_layer_{layer_idx}_raw_logits.png",
-            config,
-        )
+        save_plot(fig, raw_logits_dir / f"{model_name}_layer_{layer_idx}_raw_logits.png", config)
 
     print(f"✅ Generated basic plots")
     return layers_choice_counts
@@ -709,18 +661,22 @@ def generate_basic_plots(
 # STAGE 4: PER-EXPERT PLOTS
 # ==============================================================================
 
-
 def generate_per_expert_plots(
-    layers_router_logits: np.ndarray, output_dir: Path, model_name: str, config: Dict
+        layers_router_logits: np.ndarray,
+        output_dir: Path,
+        model_name: str,
+        config: Dict
 ):
     """Generate per-expert distribution plots (many plots!)."""
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("GENERATING PER-EXPERT PLOTS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     num_layers = layers_router_logits.shape[0]
-    num_experts = layers_router_logits.shape[2]
+    # Note: layers_router_logits is an object array of shape (num_layers,)
+    # where each element is a 2D array of shape (num_tokens_in_layer, num_experts)
+    num_experts = layers_router_logits[0].shape[1]
 
     softmax_expert_dir = output_dir / "per_expert_softmax"
     softmax_expert_dir.mkdir(exist_ok=True)
@@ -733,44 +689,29 @@ def generate_per_expert_plots(
 
     for layer_idx in tqdm(range(num_layers), desc="Per-expert plots"):
         layer_logits = layers_router_logits[layer_idx]
-        softmax_logits = np.exp(layer_logits) / np.sum(
-            np.exp(layer_logits), axis=1, keepdims=True
-        )
+        softmax_logits = np.exp(layer_logits) / np.sum(np.exp(layer_logits), axis=1, keepdims=True)
 
         for expert_idx in range(num_experts):
             # Softmax distribution
             expert_softmax = softmax_logits[:, expert_idx]
             fig, ax = plt.subplots(figsize=(10, 6))
             sns.histplot(expert_softmax, bins=100, kde=True, ax=ax)
-            ax.set_title(
-                f"Softmax Distribution - Layer {layer_idx}, Expert {expert_idx}"
-            )
+            ax.set_title(f"Softmax Distribution - Layer {layer_idx}, Expert {expert_idx}")
             ax.set_xlabel("Softmax Output")
             ax.set_ylabel("Frequency")
             ax.grid(True, alpha=0.3)
-            save_plot(
-                fig,
-                softmax_expert_dir
-                / f"{model_name}_layer_{layer_idx}_expert_{expert_idx}_softmax.png",
-                config,
-            )
+            save_plot(fig, softmax_expert_dir / f"{model_name}_layer_{layer_idx}_expert_{expert_idx}_softmax.png",
+                      config)
 
             # Raw logit distribution
             expert_raw = layer_logits[:, expert_idx]
             fig, ax = plt.subplots(figsize=(10, 6))
             sns.histplot(expert_raw, bins=100, kde=True, ax=ax)
-            ax.set_title(
-                f"Raw Logit Distribution - Layer {layer_idx}, Expert {expert_idx}"
-            )
+            ax.set_title(f"Raw Logit Distribution - Layer {layer_idx}, Expert {expert_idx}")
             ax.set_xlabel("Raw Logit")
             ax.set_ylabel("Frequency")
             ax.grid(True, alpha=0.3)
-            save_plot(
-                fig,
-                raw_expert_dir
-                / f"{model_name}_layer_{layer_idx}_expert_{expert_idx}_raw.png",
-                config,
-            )
+            save_plot(fig, raw_expert_dir / f"{model_name}_layer_{layer_idx}_expert_{expert_idx}_raw.png", config)
 
     print(f"✅ Generated {total_plots} per-expert plots")
 
@@ -779,22 +720,21 @@ def generate_per_expert_plots(
 # STAGE 5: KDE ANALYSIS PLOTS
 # ==============================================================================
 
-
 def generate_kde_plots(
-    train_logits: np.ndarray,
-    test_logits: np.ndarray,
-    kde_models_dir: Path,
-    output_dir: Path,
-    model_name: str,
-    train_dataset: str,
-    test_dataset: str,
-    config: Dict,
+        train_logits: np.ndarray,
+        test_logits: np.ndarray,
+        kde_models_dir: Path,
+        output_dir: Path,
+        model_name: str,
+        train_dataset: str,
+        test_dataset: str,
+        config: Dict
 ):
     """Generate KDE analysis plots."""
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"GENERATING KDE PLOTS ({train_dataset} -> {test_dataset})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     num_layers = train_logits.shape[0]
 
@@ -804,13 +744,11 @@ def generate_kde_plots(
 
     print("Plotting KDE cumulative density...")
     for layer_idx in tqdm(range(num_layers), desc="KDE density plots"):
-        model_path = (
-            kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
-        )
-        with open(model_path, "rb") as f:
+        model_path = kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
+        with open(model_path, 'rb') as f:
             kde_data = pickle.load(f)
 
-        x_grid, cdf_grid = kde_data["x"], kde_data["cdf"]
+        x_grid, cdf_grid = kde_data['x'], kde_data['cdf']
         test_flat = test_logits[layer_idx].flatten()
         probabilities = np.interp(test_flat, x_grid, cdf_grid)
 
@@ -821,12 +759,7 @@ def generate_kde_plots(
         ax.set_xlabel("Cumulative Density")
         ax.set_ylabel("Frequency")
         ax.grid(True, alpha=0.3)
-        save_plot(
-            fig,
-            kde_density_dir
-            / f"{model_name}_kde_density_layer_{layer_idx}_{test_dataset}.png",
-            config,
-        )
+        save_plot(fig, kde_density_dir / f"{model_name}_kde_density_layer_{layer_idx}_{test_dataset}.png", config)
 
     # 2. Trimmed logit comparison plots
     print("Plotting trimmed logit comparisons...")
@@ -853,24 +786,10 @@ def generate_kde_plots(
                 ).flatten()
 
             ax = axes[i]
-            sns.histplot(
-                train_trimmed,
-                bins=100,
-                kde=True,
-                color="blue",
-                label=train_dataset,
-                alpha=0.5,
-                ax=ax,
-            )
-            sns.histplot(
-                test_trimmed,
-                bins=100,
-                kde=True,
-                color="orange",
-                label=test_dataset,
-                alpha=0.5,
-                ax=ax,
-            )
+            sns.histplot(train_trimmed, bins=100, kde=True, color='blue',
+                         label=train_dataset, alpha=0.5, ax=ax)
+            sns.histplot(test_trimmed, bins=100, kde=True, color='orange',
+                         label=test_dataset, alpha=0.5, ax=ax)
 
             ax.set_title(f"Layer {layer_idx} - Trimmed {trim_amt} experts each side")
             ax.set_xlabel("Router Logit")
@@ -882,11 +801,7 @@ def generate_kde_plots(
             axes[j].set_visible(False)
 
         plt.tight_layout()
-        save_plot(
-            fig,
-            trimmed_dir / f"{model_name}_trimmed_comparison_layer_{layer_idx}.png",
-            config,
-        )
+        save_plot(fig, trimmed_dir / f"{model_name}_trimmed_comparison_layer_{layer_idx}.png", config)
 
     # 3. Kernel comparison plots
     print("Plotting kernel comparisons...")
@@ -898,24 +813,13 @@ def generate_kde_plots(
         test_flat = test_logits[layer_idx].flatten()
 
         for kernel_type in config["kde_kernels"]:
-            model_path = (
-                kde_models_dir
-                / f"{model_name}_distribution_model_layer_{layer_idx}_{kernel_type}.pkl"
-            )
+            model_path = kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}_{kernel_type}.pkl"
             if model_path.exists():
-                with open(model_path, "rb") as f:
+                with open(model_path, 'rb') as f:
                     kde_data = pickle.load(f)
-                probs = np.interp(test_flat, kde_data["x"], kde_data["cdf"])
-                sns.histplot(
-                    probs,
-                    bins=100,
-                    element="step",
-                    fill=False,
-                    label=kernel_type.capitalize(),
-                    alpha=0.7,
-                    linewidth=1.5,
-                    ax=ax,
-                )
+                probs = np.interp(test_flat, kde_data['x'], kde_data['cdf'])
+                sns.histplot(probs, bins=100, element="step", fill=False,
+                             label=kernel_type.capitalize(), alpha=0.7, linewidth=1.5, ax=ax)
 
         ax.set_xlim(0, 1)
         ax.set_title(f"KDE Kernel Comparison - Layer {layer_idx}")
@@ -923,11 +827,7 @@ def generate_kde_plots(
         ax.set_ylabel("Frequency")
         ax.legend(title="Kernel")
         ax.grid(True, alpha=0.3)
-        save_plot(
-            fig,
-            kernel_dir / f"{model_name}_kernel_comparison_layer_{layer_idx}.png",
-            config,
-        )
+        save_plot(fig, kernel_dir / f"{model_name}_kernel_comparison_layer_{layer_idx}.png", config)
 
     print(f"✅ Generated KDE analysis plots")
 
@@ -936,25 +836,26 @@ def generate_kde_plots(
 # STAGE 6: P-VALUE PLOTS
 # ==============================================================================
 
-
 def generate_pvalue_plots(
-    train_logits: np.ndarray,
-    test_logits: np.ndarray,
-    layers_choice_counts: List[Dict],
-    kde_models_dir: Path,
-    output_dir: Path,
-    model_name: str,
-    test_dataset: str,
-    config: Dict,
+        train_logits: np.ndarray,
+        test_logits: np.ndarray,
+        layers_choice_counts: List[Dict],
+        kde_models_dir: Path,
+        output_dir: Path,
+        model_name: str,
+        test_dataset: str,
+        config: Dict
 ):
     """Generate p-value distribution plots."""
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"GENERATING P-VALUE PLOTS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     num_layers = train_logits.shape[0]
-    num_experts = train_logits.shape[2]
+    # Note: train_logits is an object array of shape (num_layers,)
+    # where each element is a 2D array of shape (num_tokens_in_layer, num_experts)
+    num_experts = train_logits[0].shape[1]
     rng = np.random.default_rng(seed=42)
 
     # 1. Basic p-value distributions
@@ -963,13 +864,11 @@ def generate_pvalue_plots(
 
     print("Plotting basic p-value distributions...")
     for layer_idx in tqdm(range(num_layers), desc="P-value plots"):
-        model_path = (
-            kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
-        )
-        with open(model_path, "rb") as f:
+        model_path = kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
+        with open(model_path, 'rb') as f:
             kde_data = pickle.load(f)
 
-        x_grid, cdf_grid = kde_data["x"], kde_data["cdf"]
+        x_grid, cdf_grid = kde_data['x'], kde_data['cdf']
         test_flat = test_logits[layer_idx].flatten()
         probabilities = np.interp(test_flat, x_grid, cdf_grid)
         p_values = 1 - probabilities
@@ -981,11 +880,7 @@ def generate_pvalue_plots(
         ax.set_xlabel("P-Value")
         ax.set_ylabel("Frequency")
         ax.grid(True, alpha=0.3)
-        save_plot(
-            fig,
-            pvalue_dir / f"{model_name}_pvalue_layer_{layer_idx}_{test_dataset}.png",
-            config,
-        )
+        save_plot(fig, pvalue_dir / f"{model_name}_pvalue_layer_{layer_idx}_{test_dataset}.png", config)
 
     # 2. P-value vs uniform distribution
     pvalue_uniform_dir = output_dir / "pvalue_vs_uniform"
@@ -993,13 +888,11 @@ def generate_pvalue_plots(
 
     print("Plotting p-value vs uniform comparisons...")
     for layer_idx in tqdm(range(num_layers), desc="P-value uniform plots"):
-        model_path = (
-            kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
-        )
-        with open(model_path, "rb") as f:
+        model_path = kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
+        with open(model_path, 'rb') as f:
             kde_data = pickle.load(f)
 
-        x_grid, cdf_grid = kde_data["x"], kde_data["cdf"]
+        x_grid, cdf_grid = kde_data['x'], kde_data['cdf']
         test_data = test_logits[layer_idx]
         uniform_samples = rng.uniform(0, 1, size=test_data.shape)
 
@@ -1019,22 +912,10 @@ def generate_pvalue_plots(
                 kth_uniform = np.sort(uniform_samples, axis=1)[:, k]
 
                 common_bins = np.linspace(0, 1, 101)
-                sns.histplot(
-                    p_values,
-                    bins=common_bins,
-                    color="blue",
-                    label="KDE P-Value",
-                    alpha=0.7,
-                    ax=ax,
-                )
-                sns.histplot(
-                    kth_uniform,
-                    bins=common_bins,
-                    color="orange",
-                    label="Uniform",
-                    alpha=0.5,
-                    ax=ax,
-                )
+                sns.histplot(p_values, bins=common_bins, color='blue',
+                             label='KDE P-Value', alpha=0.7, ax=ax)
+                sns.histplot(kth_uniform, bins=common_bins, color='orange',
+                             label='Uniform', alpha=0.5, ax=ax)
 
                 ax.set_title(f"{get_ordinal(k + 1)} Best Expert - Layer {layer_idx}")
                 ax.set_xlabel("P-Value")
@@ -1044,12 +925,9 @@ def generate_pvalue_plots(
                 ax.grid(True, alpha=0.3)
 
             plt.tight_layout()
-            save_plot(
-                fig,
-                pvalue_uniform_dir
-                / f"{model_name}_pvalue_uniform_layer_{layer_idx}_experts_{j+1}_to_{min(j+4, num_experts)}.png",
-                config,
-            )
+            save_plot(fig, pvalue_uniform_dir /
+                      f"{model_name}_pvalue_uniform_layer_{layer_idx}_experts_{j + 1}_to_{min(j + 4, num_experts)}.png",
+                      config)
 
     # 3. P-value by most chosen experts
     pvalue_chosen_dir = output_dir / "pvalue_by_popularity"
@@ -1057,19 +935,16 @@ def generate_pvalue_plots(
 
     print("Plotting p-values by expert popularity...")
     for layer_idx in tqdm(range(num_layers), desc="P-value popularity plots"):
-        model_path = (
-            kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
-        )
-        with open(model_path, "rb") as f:
+        model_path = kde_models_dir / f"{model_name}_distribution_model_layer_{layer_idx}.pkl"
+        with open(model_path, 'rb') as f:
             kde_data = pickle.load(f)
 
-        x_grid, cdf_grid = kde_data["x"], kde_data["cdf"]
+        x_grid, cdf_grid = kde_data['x'], kde_data['cdf']
         test_data = test_logits[layer_idx]
 
         choice_dict = layers_choice_counts[layer_idx]
-        sorted_experts = sorted(
-            range(num_experts), key=lambda e: choice_dict.get(e, 0), reverse=True
-        )
+        sorted_experts = sorted(range(num_experts),
+                                key=lambda e: choice_dict.get(e, 0), reverse=True)
 
         for j in range(0, num_experts, 4):
             fig, axes = plt.subplots(2, 2, figsize=(20, 15))
@@ -1093,21 +968,10 @@ def generate_pvalue_plots(
                 bin_centers = 0.5 * (edges[:-1] + edges[1:])
                 uniform_data = np.repeat(bin_centers, samples_per_bin)
 
-                sns.histplot(
-                    p_values, bins=50, color="blue", label="KDE P-Value", ax=ax
-                )
-                sns.histplot(
-                    uniform_data,
-                    bins=edges,
-                    color="orange",
-                    label="Uniform",
-                    alpha=0.5,
-                    ax=ax,
-                )
+                sns.histplot(p_values, bins=50, color='blue', label='KDE P-Value', ax=ax)
+                sns.histplot(uniform_data, bins=edges, color='orange', label='Uniform', alpha=0.5, ax=ax)
 
-                ax.set_title(
-                    f"{rank+1}-th Most Chosen Expert ({expert_idx}) - Layer {layer_idx}"
-                )
+                ax.set_title(f"{rank + 1}-th Most Chosen Expert ({expert_idx}) - Layer {layer_idx}")
                 ax.set_xlabel("P-Value")
                 ax.set_ylabel("Frequency")
                 ax.set_xlim(0, 1)
@@ -1115,12 +979,9 @@ def generate_pvalue_plots(
                 ax.grid(True, alpha=0.3)
 
             plt.tight_layout()
-            save_plot(
-                fig,
-                pvalue_chosen_dir
-                / f"{model_name}_pvalue_popularity_layer_{layer_idx}_rank_{j+1}_to_{min(j+4, num_experts)}.png",
-                config,
-            )
+            save_plot(fig, pvalue_chosen_dir /
+                      f"{model_name}_pvalue_popularity_layer_{layer_idx}_rank_{j + 1}_to_{min(j + 4, num_experts)}.png",
+                      config)
 
     print(f"✅ Generated p-value plots")
 
@@ -1128,7 +989,6 @@ def generate_pvalue_plots(
 # ==============================================================================
 # MAIN PIPELINE
 # ==============================================================================
-
 
 def run_pipeline(config: Dict):
     """Run the complete analysis pipeline."""
@@ -1156,7 +1016,8 @@ def run_pipeline(config: Dict):
 
         for dataset_name in config["datasets"]:
             samples = load_dataset_samples(
-                dataset_name, config["max_samples"][dataset_name]
+                dataset_name,
+                config["max_samples"][dataset_name]
             )
 
             metrics, json_path = run_evaluation(
@@ -1174,10 +1035,7 @@ def run_pipeline(config: Dict):
     print("=" * 70)
 
     for dataset_name in config["datasets"]:
-        json_path = (
-            dirs["logs"]
-            / f"{config['model_name']}_{dataset_name}_internal_routing.json"
-        )
+        json_path = dirs["logs"] / f"{config['model_name']}_{dataset_name}_internal_routing.json"
         if json_path.exists():
             data = load_routing_data(json_path)
             logits, weights, choices = extract_router_logits(data)
@@ -1185,7 +1043,7 @@ def run_pipeline(config: Dict):
                 "data": data,
                 "logits": logits,
                 "weights": weights,
-                "choices": choices,
+                "choices": choices
             }
             print(f"✅ Loaded {dataset_name}: {logits.shape}")
         else:
@@ -1205,7 +1063,7 @@ def run_pipeline(config: Dict):
                 routing_data[train_dataset]["logits"],
                 dirs["kde_models"],
                 config["model_name"],
-                config,
+                config
             )
 
     # =========================================================================
@@ -1222,7 +1080,7 @@ def run_pipeline(config: Dict):
                 routing_data[train_dataset]["choices"],
                 dirs["plots_basic"],
                 config["model_name"],
-                config,
+                config
             )
 
     # =========================================================================
@@ -1235,7 +1093,7 @@ def run_pipeline(config: Dict):
                 routing_data[train_dataset]["logits"],
                 dirs["plots_per_expert"],
                 config["model_name"],
-                config,
+                config
             )
 
     # =========================================================================
@@ -1254,7 +1112,7 @@ def run_pipeline(config: Dict):
                         config["model_name"],
                         train_dataset,
                         test_dataset,
-                        config,
+                        config
                     )
 
     # =========================================================================
@@ -1273,7 +1131,7 @@ def run_pipeline(config: Dict):
                         dirs["plots_pvalue"],
                         config["model_name"],
                         test_dataset,
-                        config,
+                        config
                     )
 
     print("\n" + "=" * 70)
@@ -1285,9 +1143,10 @@ def run_pipeline(config: Dict):
 def main():
     """Main entry point."""
     if len(sys.argv) != 2:
-        print("Usage: python run_qwen_pipeline.py <config_file.json>")
+        print("Usage: python run_deepseek_pipeline.py <config_file.json>")
         sys.exit(1)
     config = load_config_from_file(sys.argv[1])
+
     # Override for quick testing:
     # config["max_samples"] = {"lambada": 50, "hellaswag": 50, "wikitext": 30}
     # config["run_per_expert_plots"] = False
