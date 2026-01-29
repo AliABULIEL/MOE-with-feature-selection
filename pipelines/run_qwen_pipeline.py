@@ -293,6 +293,7 @@ def run_evaluation(
                         .tolist(),
                         "expert_weights": layer_data["expert_weights"].numpy().tolist(),
                         "router_logits_sample": layer_data["router_logits"]
+                        .float()
                         .numpy()
                         .tolist(),
                     }
