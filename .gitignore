@@ -1,1 +1,3 @@
 .venv/
+# Add everything that is .DS_Store
+.DS_Store
