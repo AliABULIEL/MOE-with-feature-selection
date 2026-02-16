@@ -1,0 +1,40 @@
+# Qwen3-30B-A3B HC Routing with GMM Estimator
+# =============================================
+
+model:
+  name: "qwen"
+  model_id: "Qwen/Qwen3-30B-A3B"
+  num_experts: 128
+  default_top_k: 8
+  dtype: "bfloat16"
+  device_map: "auto"
+
+estimator:
+  type: "gmm"
+  quantile_range: [0.05, 0.95]
+  n_components: 3
+  model_dir: null  # Train on-the-fly
+
+hc_routing:
+  beta: 0.5
+  temperature: 1.0
+  min_k: 2
+  max_k: 8
+  patch_mode: null
+
+evaluation:
+  datasets:
+    - "wikitext"
+  max_samples: 200
+  max_length: 512
+  batch_size: 1
+  log_every_n: 100
+
+output:
+  results_dir: "./results/qwen_gmm"
+  save_plots: true
+  save_logs: true
+  plot_format: "png"
+  plot_dpi: 100
+
+device: "cuda"

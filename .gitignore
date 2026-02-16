@@ -1,3 +1,8 @@
 .venv/
+__pycache__
 # Add everything that is .DS_Store
 .DS_Store
+random_tests.ipynb
+OLMoE_random_routing_WorkFlow.ipynb
+olmoe_random_routing_workflow_updated.py
+notebook_script.py
