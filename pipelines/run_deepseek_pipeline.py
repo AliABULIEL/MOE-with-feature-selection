@@ -322,6 +322,18 @@ def run_evaluation(
             loss = outputs.loss.item()
             num_tokens = input_ids.shape[1]
 
+            # Calculate per-token loss
+            # Shift logits and labels by one position for next-token prediction
+            shift_logits = outputs.logits[..., :-1, :].contiguous()
+            shift_labels = input_ids[..., 1:].contiguous()
+            
+            # Use reduction='none' to get a list of individual token losses
+            per_token_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction='none'
+            ).tolist()
+
             # Get routing data captured by hooks
             routing_data = router_logger.get_routing_data()
 
@@ -330,6 +342,7 @@ def run_evaluation(
                 "sample_id": i,
                 "num_tokens": num_tokens,
                 "loss": loss,
+                "per_token_loss": per_token_loss,
                 "layers": [],
             }
 
@@ -368,24 +381,33 @@ def run_evaluation(
         "samples": all_samples_data,
     }
 
-    json_path = (
-        output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.json"
+    pt_path = (
+        output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.pt"
     )
-    with open(json_path, "w") as f:
-        json.dump(output_data, f, indent=2)
+    torch.save(output_data, pt_path)
+    saved_paths = str(pt_path)
+
+    try:
+        import pandas as pd
+        df = pd.DataFrame(all_samples_data)
+        parquet_path = output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.parquet"
+        df.to_parquet(parquet_path)
+        saved_paths += f" and {parquet_path}"
+    except Exception:
+        pass
 
     print(f"✅ Evaluation complete")
     print(f"   Perplexity: {perplexity:.2f}")
     print(f"   Avg Loss: {avg_loss:.4f}")
     print(f"   Total Tokens: {total_tokens}")
-    print(f"   Saved to: {json_path}")
+    print(f"   Saved to: {saved_paths}")
 
     return {
         "perplexity": perplexity,
         "avg_loss": avg_loss,
         "total_tokens": total_tokens,
         "num_samples": len(all_samples_data),
-    }, json_path
+    }, pt_path
 
 
 # ==============================================================================
@@ -393,10 +415,15 @@ def run_evaluation(
 # ==============================================================================
 
 
-def load_routing_data(json_path: Path) -> Dict:
-    """Load routing data from JSON file."""
-    with open(json_path, "r") as f:
-        return json.load(f)
+def load_routing_data(file_path: Path) -> Dict:
+    """Load routing data."""
+    if str(file_path).endswith('.json'):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    elif str(file_path).endswith('.pt'):
+        return torch.load(file_path)
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
 
 
 def extract_router_logits(data: Dict) -> Tuple[np.ndarray, List, List]:
@@ -1174,12 +1201,13 @@ def run_pipeline(config: Dict):
     print("=" * 70)
 
     for dataset_name in config["datasets"]:
-        json_path = (
-            dirs["logs"]
-            / f"{config['model_name']}_{dataset_name}_internal_routing.json"
-        )
-        if json_path.exists():
-            data = load_routing_data(json_path)
+        pt_path = dirs["logs"] / f"{config['model_name']}_{dataset_name}_internal_routing.pt"
+        json_path = dirs["logs"] / f"{config['model_name']}_{dataset_name}_internal_routing.json"
+        
+        file_to_load = pt_path if pt_path.exists() else json_path
+        
+        if file_to_load.exists():
+            data = load_routing_data(file_to_load)
             logits, weights, choices = extract_router_logits(data)
             routing_data[dataset_name] = {
                 "data": data,
