@@ -356,17 +356,24 @@ def load_routing_data(file_path: Path) -> Dict:
 
 
 def extract_router_logits(data: Dict) -> Tuple[np.ndarray, List, List]:
-    num_layers = data["num_layers"]
+    if not data.get("samples") or not data["samples"][0].get("layers"):
+        return np.array([]), [], []
+        
+    unique_layers = sorted(list(set(l["layer"] for l in data["samples"][0]["layers"])))
+    layer_map = {layer: i for i, layer in enumerate(unique_layers)}
+    
+    num_layers = len(unique_layers)
     layers_logits = [[] for _ in range(num_layers)]
     layers_weights = [[] for _ in range(num_layers)]
     layers_choices = [[] for _ in range(num_layers)]
 
     for sample in data["samples"]:
         for layer_data in sample["layers"]:
-            idx = layer_data["layer"]
-            layers_logits[idx].extend(layer_data["router_logits_sample"])
-            layers_weights[idx].extend(layer_data["expert_weights"])
-            layers_choices[idx].extend(layer_data["selected_experts"])
+            if layer_data["layer"] in layer_map:
+                idx = layer_map[layer_data["layer"]]
+                layers_logits[idx].extend(layer_data["router_logits_sample"])
+                layers_weights[idx].extend(layer_data["expert_weights"])
+                layers_choices[idx].extend(layer_data["selected_experts"])
 
     return (
         np.array([np.array(arr) for arr in layers_logits]),
