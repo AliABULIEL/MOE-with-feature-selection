@@ -318,38 +318,18 @@ def run_evaluation(
     avg_loss = total_loss / total_tokens if total_tokens > 0 else float("inf")
     perplexity = float(np.exp(avg_loss))
 
-    output_data = {
-        "config": config["model_id"],
-        "strategy": "topk_baseline",
-        "num_experts": config["num_experts"],
-        "top_k": config["default_top_k"],
-        "dataset": dataset_name,
-        "timestamp": datetime.now().isoformat(),
-        "num_layers": len(all_samples_data[0]["layers"]) if all_samples_data else 0,
-        "samples": all_samples_data,
-    }
-
-    pt_path = (
-        output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.pt"
-    )
-    torch.save(output_data, pt_path)
-    saved_paths = str(pt_path)
-
-    try:
-        import pandas as pd
-        df = pd.DataFrame(all_samples_data)
-        parquet_path = output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.parquet"
-        df.to_parquet(parquet_path)
-        saved_paths += f" and {parquet_path}"
-    except Exception:
-        pass
+    import pandas as pd
+    df = pd.DataFrame(all_samples_data)
+    parquet_path = output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.parquet"
+    df.to_parquet(parquet_path)
+    saved_paths = str(parquet_path)
 
     print(f"✅ Perplexity: {perplexity:.2f}, Saved to: {saved_paths}")
     return {
         "perplexity": perplexity,
         "avg_loss": avg_loss,
         "total_tokens": total_tokens,
-    }, pt_path
+    }, parquet_path
 
 
 # ==============================================================================
@@ -363,6 +343,14 @@ def load_routing_data(file_path: Path) -> Dict:
             return json.load(f)
     elif str(file_path).endswith('.pt'):
         return torch.load(file_path)
+    elif str(file_path).endswith('.parquet'):
+        import pandas as pd
+        df = pd.read_parquet(file_path)
+        samples = df.to_dict(orient="records")
+        return {
+            "num_layers": len(samples[0]["layers"]) if samples else 0,
+            "samples": samples
+        }
     else:
         raise ValueError(f"Unsupported file format: {file_path}")
 
@@ -861,10 +849,16 @@ def run_pipeline(config: Dict):
     # LOAD DATA
     print("\n" + "=" * 70 + "\nLOADING ROUTING DATA\n" + "=" * 70)
     for ds_name in config["datasets"]:
+        parquet_path = dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.parquet"
         pt_path = dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.pt"
         json_path = dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.json"
         
-        file_to_load = pt_path if pt_path.exists() else json_path
+        if parquet_path.exists():
+            file_to_load = parquet_path
+        elif pt_path.exists():
+            file_to_load = pt_path
+        else:
+            file_to_load = json_path
         
         if file_to_load.exists():
             data = load_routing_data(file_to_load)
