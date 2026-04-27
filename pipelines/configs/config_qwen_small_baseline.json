@@ -1,0 +1,19 @@
+{
+    "model_id": "Qwen/Qwen3-0.6B",
+    "model_name": "qwen_small",
+    "datasets": [
+        "lambada",
+        "hellaswag",
+        "wikitext"
+    ],
+    "max_samples": {
+        "lambada": 500,
+        "hellaswag": 500,
+        "wikitext": 300
+    },
+    "max_length": 512,
+    "output_dir": "./outputs/qwen_small",
+    "run_evaluation": true,
+    "device": "cuda",
+    "dtype": "bfloat16"
+}
