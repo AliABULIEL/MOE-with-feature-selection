@@ -1,3 +1,8 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+from typing import Optional, List, Dict
+
 class RouterLogger:
     def __init__(self, model):
         """
@@ -66,14 +71,32 @@ class RouterLogger:
 
             return hook_fn
 
+        # Robust layer resolution to handle standard, ForCausalLM, and PEFT wrappers
         layers = None
-        if hasattr(self.model, "language_model"):
+        
+        if hasattr(self.model, "language_model") and hasattr(self.model.language_model, "layers"):
+            # Direct base multimodal model
             layers = self.model.language_model.layers
+        elif hasattr(self.model, "model") and hasattr(self.model.model, "language_model") and hasattr(self.model.model.language_model, "layers"):
+            # Wrapped in ForConditionalGeneration or similar
+            layers = self.model.model.language_model.layers
+        elif hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+            # Standard HF wrapper fallback
+            layers = self.model.model.layers
         elif hasattr(self.model, "layers"):
+            # Passed the base text model directly
             layers = self.model.layers
-            
+        elif hasattr(self.model, "base_model") and hasattr(self.model.base_model, "model"):
+            # Wrapped in PEFT / LoRA
+            if hasattr(self.model.base_model.model, "language_model"):
+                layers = self.model.base_model.model.language_model.layers
+            elif hasattr(self.model.base_model.model, "layers"):
+                layers = self.model.base_model.model.layers
+
         if layers is None:
-            raise ValueError("Could not find layers in the provided model structure.")
+            # Print the top-level modules to help with debugging if it still fails
+            module_names = [name for name, _ in self.model.named_children()]
+            raise ValueError(f"Could not find layers. Top-level modules found: {module_names}")
 
         for i, layer in enumerate(layers):
             if hasattr(layer, "router") and hasattr(layer.router, "proj"):
