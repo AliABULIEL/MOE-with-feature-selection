@@ -16,7 +16,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from moe_internal_logging_gemma import RouterLogger
-from pipelines.utils import calculate_text_metrics
+from pipelines.utils import calculate_text_metrics, load_dataset_samples
 
 
 def load_config_from_file(config_path: str) -> Dict:
@@ -70,47 +70,6 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
     return model, tokenizer
 
 
-def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
-    from datasets import load_dataset
-
-    print(f"Loading {dataset_name} dataset (max {max_samples} samples)...")
-
-    if dataset_name == "lambada":
-        try:
-            dataset = load_dataset("lambada", split="test")
-        except:
-            dataset = load_dataset("EleutherAI/lambada_openai", "en", split="test")
-        samples = [
-            {"text": item.get("text", "")}
-            for item in dataset
-            if item.get("text", "").strip()
-        ]
-    elif dataset_name == "hellaswag":
-        dataset = load_dataset("hellaswag", split="validation")
-        samples = []
-        for item in dataset:
-            ctx, endings, label = (
-                item.get("ctx", ""),
-                item.get("endings", []),
-                int(item.get("label", 0)),
-            )
-            if ctx and endings and 0 <= label < len(endings):
-                samples.append({"text": f"{ctx} {endings[label]}"})
-    elif dataset_name == "wikitext":
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        samples = [
-            {"text": item.get("text", "")}
-            for item in dataset
-            if item.get("text", "").strip() and len(item.get("text", "").split()) > 10
-        ]
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    samples = samples[:max_samples]
-    print(f"✅ Loaded {len(samples)} samples from {dataset_name}")
-    return samples
-
-
 def run_evaluation(
     model,
     tokenizer,
@@ -133,15 +92,17 @@ def run_evaluation(
             continue
 
         router_logger.clear_data()
-        
-        total_nll, per_token_loss, num_tokens = calculate_text_metrics(model, tokenizer, text)
+
+        total_nll, per_token_loss, num_tokens = calculate_text_metrics(
+            model, tokenizer, text
+        )
 
         if num_tokens < 2:
             continue
 
         routing_data = router_logger.get_routing_data()
         loss = total_nll / num_tokens if num_tokens > 0 else float("inf")
-        
+
         sample_data = {
             "sample_id": i,
             "num_tokens": num_tokens,
@@ -157,7 +118,10 @@ def run_evaluation(
                     "router_logits_shape": list(layer_data["router_logits"].shape),
                     "selected_experts": layer_data["expert_indices"].numpy().tolist(),
                     "expert_weights": layer_data["expert_weights"].numpy().tolist(),
-                    "router_logits_sample": layer_data["router_logits"].float().numpy().tolist(),
+                    "router_logits_sample": layer_data["router_logits"]
+                    .float()
+                    .numpy()
+                    .tolist(),
                 }
             )
 
@@ -171,8 +135,11 @@ def run_evaluation(
     perplexity = float(np.exp(avg_loss))
 
     import pandas as pd
+
     df = pd.DataFrame(all_samples_data)
-    parquet_path = output_dir / f"{config['model_name']}_{dataset_name}_metrics_routing.parquet"
+    parquet_path = (
+        output_dir / f"{config['model_name']}_{dataset_name}_metrics_routing.parquet"
+    )
     df.to_parquet(parquet_path)
     saved_paths = str(parquet_path)
 
@@ -201,7 +168,12 @@ def run_pipeline(config: Dict):
         del model, tokenizer
         torch.cuda.empty_cache()
 
-    print("\n" + "=" * 70 + f"\nPIPELINE COMPLETE\nOutput: {config['output_dir']}\n" + "=" * 70)
+    print(
+        "\n"
+        + "=" * 70
+        + f"\nPIPELINE COMPLETE\nOutput: {config['output_dir']}\n"
+        + "=" * 70
+    )
 
 
 def main():

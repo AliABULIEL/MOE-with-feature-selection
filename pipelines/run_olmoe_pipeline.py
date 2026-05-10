@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import the existing RouterLogger from moe_internal_logging.py
 from moe_internal_logging import RouterLogger, InternalRoutingLogger
+from pipelines.utils import load_dataset_samples
 
 # ==============================================================================
 # CONFIGURABLE PARAMETERS
@@ -187,48 +188,6 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
     return model, tokenizer
 
 
-def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
-    """Load dataset samples."""
-    from datasets import load_dataset
-
-    print(f"Loading {dataset_name} dataset (max {max_samples} samples)...")
-
-    if dataset_name == "lambada":
-        try:
-            dataset = load_dataset("lambada", split="test")
-        except:
-            dataset = load_dataset("EleutherAI/lambada_openai", "en", split="test")
-        samples = [
-            {"text": item.get("text", "")} # type: ignore
-            for item in dataset
-            if item.get("text", "").strip() # type: ignore
-        ]
-    elif dataset_name == "hellaswag":
-        dataset = load_dataset("hellaswag", split="validation")
-        samples = []
-        for item in dataset:
-            ctx, endings, label = (
-                item.get("ctx", ""), # type: ignore
-                item.get("endings", []), # type: ignore
-                int(item.get("label", 0)), # type: ignore
-            )
-            if ctx and endings and 0 <= label < len(endings):
-                samples.append({"text": f"{ctx} {endings[label]}"})
-    elif dataset_name == "wikitext":
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        samples = [
-            {"text": item.get("text", "")} # type: ignore
-            for item in dataset
-            if item.get("text", "").strip() and len(item.get("text", "").split()) > 10 # type: ignore
-        ]
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    samples = samples[:max_samples]
-    print(f"✅ Loaded {len(samples)} samples from {dataset_name}")
-    return samples
-
-
 # ==============================================================================
 # STAGE 1C: EVALUATION WITH LOGGING (USES YOUR RouterLogger)
 # ==============================================================================
@@ -281,7 +240,7 @@ def run_evaluation(
             per_token_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
-                reduction='none'
+                reduction="none",
             ).tolist()
 
             routing_data = router_logger.get_routing_data()
@@ -319,8 +278,11 @@ def run_evaluation(
     perplexity = float(np.exp(avg_loss))
 
     import pandas as pd
+
     df = pd.DataFrame(all_samples_data)
-    parquet_path = output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.parquet"
+    parquet_path = (
+        output_dir / f"{config['model_name']}_{dataset_name}_internal_routing.parquet"
+    )
     df.to_parquet(parquet_path)
     saved_paths = str(parquet_path)
 
@@ -338,18 +300,19 @@ def run_evaluation(
 
 
 def load_routing_data(file_path: Path) -> Dict:
-    if str(file_path).endswith('.json'):
+    if str(file_path).endswith(".json"):
         with open(file_path, "r") as f:
             return json.load(f)
-    elif str(file_path).endswith('.pt'):
+    elif str(file_path).endswith(".pt"):
         return torch.load(file_path)
-    elif str(file_path).endswith('.parquet'):
+    elif str(file_path).endswith(".parquet"):
         import pandas as pd
+
         df = pd.read_parquet(file_path)
         samples = df.to_dict(orient="records")
         return {
             "num_layers": len(samples[0]["layers"]) if samples else 0,
-            "samples": samples
+            "samples": samples,
         }
     else:
         raise ValueError(f"Unsupported file format: {file_path}")
@@ -358,10 +321,10 @@ def load_routing_data(file_path: Path) -> Dict:
 def extract_router_logits(data: Dict) -> Tuple[np.ndarray, List, List]:
     if not data.get("samples") or not data["samples"][0].get("layers"):
         return np.array([]), [], []
-        
+
     unique_layers = sorted(list(set(l["layer"] for l in data["samples"][0]["layers"])))
     layer_map = {layer: i for i, layer in enumerate(unique_layers)}
-    
+
     num_layers = len(unique_layers)
     layers_logits = [[] for _ in range(num_layers)]
     layers_weights = [[] for _ in range(num_layers)]
@@ -856,17 +819,21 @@ def run_pipeline(config: Dict):
     # LOAD DATA
     print("\n" + "=" * 70 + "\nLOADING ROUTING DATA\n" + "=" * 70)
     for ds_name in config["datasets"]:
-        parquet_path = dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.parquet"
+        parquet_path = (
+            dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.parquet"
+        )
         pt_path = dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.pt"
-        json_path = dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.json"
-        
+        json_path = (
+            dirs["logs"] / f"{config['model_name']}_{ds_name}_internal_routing.json"
+        )
+
         if parquet_path.exists():
             file_to_load = parquet_path
         elif pt_path.exists():
             file_to_load = pt_path
         else:
             file_to_load = json_path
-        
+
         if file_to_load.exists():
             data = load_routing_data(file_to_load)
             logits, weights, choices = extract_router_logits(data)

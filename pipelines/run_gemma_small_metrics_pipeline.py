@@ -16,7 +16,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Kept your existing text metrics utility import
-from pipelines.utils import calculate_text_metrics
+from pipelines.utils import calculate_text_metrics, load_dataset_samples
 
 
 def load_config_from_file(config_path: str) -> Dict:
@@ -27,7 +27,9 @@ def load_config_from_file(config_path: str) -> Dict:
         CONFIG = json.load(f)
 
     CONFIG["device"] = (
-        "cuda" if CONFIG.get("device", "cuda") == "cuda" and torch.cuda.is_available() else "cpu"
+        "cuda"
+        if CONFIG.get("device", "cuda") == "cuda" and torch.cuda.is_available()
+        else "cpu"
     )
     return CONFIG
 
@@ -56,59 +58,18 @@ def load_model(config: Dict) -> Tuple[Any, Any]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     print(f"Loading model: {config['model_id']}")
-    tokenizer = AutoTokenizer.from_pretrained(config['model_id'])
+    tokenizer = AutoTokenizer.from_pretrained(config["model_id"])
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        config['model_id'],
+        config["model_id"],
         torch_dtype=get_torch_dtype(config.get("dtype", "bfloat16")),
         device_map="auto",
     )
     model.eval()
     print(f"✅ Model loaded successfully")
     return model, tokenizer
-
-
-def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
-    from datasets import load_dataset
-
-    print(f"Loading {dataset_name} dataset (max {max_samples} samples)...")
-
-    if dataset_name == "lambada":
-        try:
-            dataset = load_dataset("lambada", split="test")
-        except:
-            dataset = load_dataset("EleutherAI/lambada_openai", "en", split="test")
-        samples = [
-            {"text": item.get("text", "")}
-            for item in dataset
-            if item.get("text", "").strip()
-        ]
-    elif dataset_name == "hellaswag":
-        dataset = load_dataset("hellaswag", split="validation")
-        samples = []
-        for item in dataset:
-            ctx, endings, label = (
-                item.get("ctx", ""),
-                item.get("endings", []),
-                int(item.get("label", 0)),
-            )
-            if ctx and endings and 0 <= label < len(endings):
-                samples.append({"text": f"{ctx} {endings[label]}"})
-    elif dataset_name == "wikitext":
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        samples = [
-            {"text": item.get("text", "")}
-            for item in dataset
-            if item.get("text", "").strip() and len(item.get("text", "").split()) > 10
-        ]
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    samples = samples[:max_samples]
-    print(f"✅ Loaded {len(samples)} samples from {dataset_name}")
-    return samples
 
 
 def run_evaluation(
@@ -128,15 +89,17 @@ def run_evaluation(
         text = sample.get("text", "")
         if not text.strip():
             continue
-        
+
         # Calculate NLL and per token loss using your existing utility
-        total_nll, per_token_loss, num_tokens = calculate_text_metrics(model, tokenizer, text)
+        total_nll, per_token_loss, num_tokens = calculate_text_metrics(
+            model, tokenizer, text
+        )
 
         if num_tokens < 2:
             continue
 
         loss = total_nll / num_tokens if num_tokens > 0 else float("inf")
-        
+
         sample_data = {
             "sample_id": i,
             "num_tokens": num_tokens,
@@ -152,10 +115,11 @@ def run_evaluation(
     perplexity = float(np.exp(avg_loss))
 
     import pandas as pd
+
     df = pd.DataFrame(all_samples_data)
-    
+
     # Updated output name to reflect dense metrics
-    model_name_clean = config.get('model_name', config['model_id'].split('/')[-1])
+    model_name_clean = config.get("model_name", config["model_id"].split("/")[-1])
     parquet_path = output_dir / f"{model_name_clean}_{dataset_name}_metrics.parquet"
     df.to_parquet(parquet_path)
 
@@ -184,7 +148,12 @@ def run_pipeline(config: Dict):
         del model, tokenizer
         torch.cuda.empty_cache()
 
-    print("\n" + "=" * 70 + f"\nPIPELINE COMPLETE\nOutput: {config['output_dir']}\n" + "=" * 70)
+    print(
+        "\n"
+        + "=" * 70
+        + f"\nPIPELINE COMPLETE\nOutput: {config['output_dir']}\n"
+        + "=" * 70
+    )
 
 
 def main():
