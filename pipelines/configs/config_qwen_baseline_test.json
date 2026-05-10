@@ -6,12 +6,14 @@
     "datasets": [
         "lambada",
         "hellaswag",
-        "wikitext"
+        "wikitext",
+        "tinystories"
     ],
     "max_samples": {
         "lambada": 5,
         "hellaswag": 5,
-        "wikitext": 3
+        "wikitext": 3,
+        "tinystories": 5
     },
     "max_length": 512,
     "kde_train_dataset": "lambada",

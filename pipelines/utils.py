@@ -80,7 +80,7 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
             for item in dataset
             if item.get("text", "").strip() and len(item.get("text", "").split()) > 10
         ]
-    elif dataset_name == "roneneldan/TinyStories":
+    elif dataset_name == "tinystories":
         dataset = load_dataset("roneneldan/TinyStories", split="validation")
         samples = [
             {"text": item.get("text", "")}
