@@ -50,6 +50,20 @@ def calculate_text_metrics(model, tokenizer, text):
 
 def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
 
+    # Handle case where config dictionary is passed instead of max_samples integer (e.g. in some HC pipelines)
+    if isinstance(max_samples, dict):
+        config_dict = max_samples
+        if "max_samples" in config_dict:
+            max_samples_field = config_dict["max_samples"]
+            if isinstance(max_samples_field, dict):
+                max_samples = max_samples_field.get(dataset_name, 1000)
+            elif isinstance(max_samples_field, int):
+                max_samples = max_samples_field
+            else:
+                max_samples = 1000
+        else:
+            max_samples = 1000
+
     print(f"Loading {dataset_name} dataset (max {max_samples} samples)...")
 
     if dataset_name == "lambada":
@@ -87,6 +101,23 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
             for item in dataset
             if item.get("text", "").strip()
         ]
+    elif dataset_name in ["fineweb-edu", "HuggingFaceFW/fineweb-edu"]:
+        try:
+            dataset = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train", streaming=True)
+        except Exception:
+            try:
+                dataset = load_dataset("HuggingFaceFW/fineweb-edu", name="default", split="train", streaming=True)
+            except Exception:
+                dataset = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train")
+
+        samples = []
+        for item in dataset:
+            text = item.get("text", "")
+            language = item.get("language", "")
+            if language == "en" and text.strip():
+                samples.append({"text": text})
+                if len(samples) >= max_samples:
+                    break
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
