@@ -1,0 +1,26 @@
+{
+    "datasets": [
+        "lambada",
+        "hellaswag",
+        "wikitext",
+        "fineweb-edu"
+    ],
+    "max_samples": {
+        "lambada": 5,
+        "hellaswag": 5,
+        "wikitext": 3,
+        "fineweb-edu": 5
+    },
+    "max_length": 512,
+    "output_dir": "./outputs/olmoe_hc",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "hc_routing_enabled": true,
+    "hc_threshold": 4.0,
+    "model_id": "allenai/OLMoE-1B-7B-0924",
+    "model_name": "olmoe",
+    "num_experts": 64,
+    "default_top_k": 8,
+    "hc_layer": 15,
+    "hc_estimators_base_dir": "../null_models_metrics/OLMoE"
+}

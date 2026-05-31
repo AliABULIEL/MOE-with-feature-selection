@@ -1,0 +1,26 @@
+{
+    "datasets": [
+        "lambada",
+        "hellaswag",
+        "wikitext",
+        "fineweb-edu"
+    ],
+    "max_samples": {
+        "lambada": 5,
+        "hellaswag": 5,
+        "wikitext": 3,
+        "fineweb-edu": 5
+    },
+    "max_length": 512,
+    "output_dir": "./outputs/qwen_hc",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "hc_routing_enabled": true,
+    "hc_threshold": 4.0,
+    "model_id": "Qwen/Qwen3-30B-A3B",
+    "model_name": "qwen",
+    "num_experts": 128,
+    "default_top_k": 8,
+    "hc_layer": 27,
+    "hc_estimators_base_dir": "../null_models_metrics/Qwen"
+}

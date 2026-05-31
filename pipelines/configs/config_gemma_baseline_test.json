@@ -7,13 +7,15 @@
         "lambada",
         "hellaswag",
         "wikitext",
-        "tinystories"
+        "tinystories",
+        "fineweb-edu"
     ],
     "max_samples": {
         "lambada": 5,
         "hellaswag": 5,
         "wikitext": 3,
-        "tinystories": 5
+        "tinystories": 5,
+        "fineweb-edu": 5
     },
     "max_length": 512,
     "output_dir": "./outputs/gemma",
