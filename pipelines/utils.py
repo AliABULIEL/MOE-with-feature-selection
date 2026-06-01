@@ -3,7 +3,7 @@ from datasets import load_dataset
 from typing import Dict, List
 
 
-def calculate_text_metrics(model, tokenizer, text):
+def calculate_text_metrics(model, tokenizer, text, max_length=None):
     """
     Calculates the Total NLL, per-token loss, and token count for a given text.
 
@@ -11,6 +11,7 @@ def calculate_text_metrics(model, tokenizer, text):
         model: An initialized Hugging Face CausalLM.
         tokenizer: The corresponding initialized tokenizer.
         text (str): The text to evaluate.
+        max_length (int, optional): The maximum sequence length.
 
     Returns:
         total_nll (float): The sum of the negative log probabilities.
@@ -18,7 +19,12 @@ def calculate_text_metrics(model, tokenizer, text):
         amount_of_tokens (int): The total number of tokens in the input text.
     """
     # 1. Tokenize and move to the model's device
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        max_length=max_length,
+        truncation=max_length is not None
+    ).to(model.device)
     input_ids = inputs["input_ids"]
 
     amount_of_tokens = input_ids.size(1)

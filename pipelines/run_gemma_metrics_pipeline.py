@@ -4,6 +4,8 @@ Gemma 4 MoE Metrics Pipeline
 """
 
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import sys
 import json
 from pathlib import Path
@@ -94,7 +96,7 @@ def run_evaluation(
         router_logger.clear_data()
 
         total_nll, per_token_loss, num_tokens = calculate_text_metrics(
-            model, tokenizer, text
+            model, tokenizer, text, max_length=config.get("max_length")
         )
 
         if num_tokens < 2:

@@ -7,7 +7,7 @@
         "fineweb-edu"
     ],
     "max_samples": {
-        "fineweb-edu": 500
+        "fineweb-edu": 100
     },
     "max_length": 512,
     "output_dir": "./outputs/qwen",
