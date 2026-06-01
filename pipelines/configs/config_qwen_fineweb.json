@@ -1,0 +1,17 @@
+{
+    "model_id": "Qwen/Qwen3-30B-A3B",
+    "model_name": "qwen",
+    "num_experts": 128,
+    "default_top_k": 8,
+    "datasets": [
+        "fineweb-edu"
+    ],
+    "max_samples": {
+        "fineweb-edu": 500
+    },
+    "max_length": 512,
+    "output_dir": "./outputs/qwen",
+    "run_evaluation": true,
+    "device": "cuda",
+    "dtype": "bfloat16"
+}
