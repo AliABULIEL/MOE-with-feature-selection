@@ -12,12 +12,14 @@ import pytest
 import torch
 import torch.nn as nn
 import numpy as np
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import json
 import tempfile
 import shutil
 
-from moe_internal_logging import RouterLogger, InternalRoutingLogger
+from pipelines.internal_logging.moe_internal_logging import RouterLogger, InternalRoutingLogger
 
 
 # =========================================================================

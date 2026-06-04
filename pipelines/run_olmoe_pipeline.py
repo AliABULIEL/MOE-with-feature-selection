@@ -40,12 +40,12 @@ from tqdm import tqdm
 from scipy.stats import gaussian_kde
 from sklearn.neighbors import KernelDensity
 
-# Add parent directory to path so we can import the logging modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add current directory to path so we can import the logging/utils modules locally
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Import the existing RouterLogger from moe_internal_logging.py
-from moe_internal_logging import RouterLogger, InternalRoutingLogger
-from pipelines.utils import load_dataset_samples
+# Import the existing RouterLogger from internal_logging/moe_internal_logging.py
+from internal_logging.moe_internal_logging import RouterLogger, InternalRoutingLogger
+from utils import load_dataset_samples
 
 # ==============================================================================
 # CONFIGURABLE PARAMETERS

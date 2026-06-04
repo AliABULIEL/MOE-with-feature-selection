@@ -150,9 +150,9 @@ def patch_model_with_hc_routing(model, config: ExperimentConfig, estimators: Dic
     """
     # Import model-specific logging
     if config.model.name == "deepseek":
-        from moe_internal_logging_deepseek import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_deepseek import RouterLogger
     elif config.model.name == "qwen":
-        from moe_internal_logging_qwen import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_qwen import RouterLogger
     else:
         raise ValueError(f"Unknown model: {config.model.name}")
     

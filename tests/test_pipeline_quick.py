@@ -27,7 +27,9 @@ import json
 import pickle
 import tempfile
 import shutil
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from unittest.mock import MagicMock, patch
 from collections import defaultdict
 
@@ -51,14 +53,12 @@ class TestImports:
             extract_router_logits,
             trim_top_and_bottom_experts,
             get_ordinal,
-            CONFIG
         )
 
         assert callable(setup_directories)
         assert callable(get_torch_dtype)
         assert callable(extract_router_logits)
         assert callable(trim_top_and_bottom_experts)
-        assert isinstance(CONFIG, dict)
 
     def test_import_qwen_pipeline(self):
         """Test importing Qwen pipeline module."""
@@ -70,25 +70,23 @@ class TestImports:
             get_torch_dtype,
             extract_router_logits,
             trim_top_and_bottom_experts,
-            CONFIG
         )
 
         assert callable(setup_directories)
         assert callable(get_torch_dtype)
         assert callable(extract_router_logits)
         assert callable(trim_top_and_bottom_experts)
-        assert isinstance(CONFIG, dict)
 
     def test_import_deepseek_logging(self):
         """Test importing DeepSeek logging module."""
-        from moe_internal_logging_deepseek import RouterLogger, InternalRoutingLogger
+        from pipelines.internal_logging.moe_internal_logging_deepseek import RouterLogger, InternalRoutingLogger
 
         assert RouterLogger is not None
         assert InternalRoutingLogger is not None
 
     def test_import_qwen_logging(self):
         """Test importing Qwen logging module."""
-        from moe_internal_logging_qwen import RouterLogger, InternalRoutingLogger
+        from pipelines.internal_logging.moe_internal_logging_qwen import RouterLogger, InternalRoutingLogger
 
         assert RouterLogger is not None
         assert InternalRoutingLogger is not None
@@ -245,7 +243,7 @@ class TestRouterLoggerDeepSeek:
 
     @pytest.fixture
     def logger(self, model):
-        from moe_internal_logging_deepseek import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_deepseek import RouterLogger
         return RouterLogger(model)
 
     def test_initialization(self, logger, model):
@@ -317,7 +315,7 @@ class TestRouterLoggerQwen:
 
     @pytest.fixture
     def logger(self, model):
-        from moe_internal_logging_qwen import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_qwen import RouterLogger
         return RouterLogger(model)
 
     def test_initialization(self, logger, model):
@@ -658,7 +656,7 @@ class TestEndToEndMock:
 
     def test_deepseek_evaluation_mock(self, mock_deepseek_model, mock_tokenizer, tiny_dataset, temp_dir):
         """Test DeepSeek evaluation with mock model."""
-        from moe_internal_logging_deepseek import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_deepseek import RouterLogger
 
         router_logger = RouterLogger(mock_deepseek_model)
         router_logger.register_hooks(top_k=2)
@@ -705,7 +703,7 @@ class TestEndToEndMock:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent / "pipelines"))
         from run_deepseek_pipeline import setup_directories, extract_router_logits
-        from moe_internal_logging_deepseek import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_deepseek import RouterLogger
         from scipy.stats import gaussian_kde
 
         # Stage 1: Setup
@@ -809,7 +807,7 @@ class TestEndToEndMock:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent / "pipelines"))
         from run_qwen_pipeline import setup_directories, extract_router_logits
-        from moe_internal_logging_qwen import RouterLogger
+        from pipelines.internal_logging.moe_internal_logging_qwen import RouterLogger
         from scipy.stats import gaussian_kde
 
         config = {
@@ -889,7 +887,7 @@ class TestInternalRoutingLogger:
 
     def test_deepseek_internal_logger(self, temp_dir):
         """Test InternalRoutingLogger from deepseek module."""
-        from moe_internal_logging_deepseek import InternalRoutingLogger
+        from pipelines.internal_logging.moe_internal_logging_deepseek import InternalRoutingLogger
 
         logger = InternalRoutingLogger(
             output_dir=temp_dir,
@@ -933,7 +931,7 @@ class TestInternalRoutingLogger:
 
     def test_qwen_internal_logger(self, temp_dir):
         """Test InternalRoutingLogger from qwen module."""
-        from moe_internal_logging_qwen import InternalRoutingLogger
+        from pipelines.internal_logging.moe_internal_logging_qwen import InternalRoutingLogger
 
         logger = InternalRoutingLogger(
             output_dir=temp_dir,

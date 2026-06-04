@@ -15,12 +15,12 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
-from moe_internal_logging import RouterLogger
-from pipelines.utils import calculate_text_metrics, load_dataset_samples
-from pipelines.hc_models.utils import load_hc_estimator
-from pipelines.hc_models.patching import patch_model_with_hc
+from internal_logging.moe_internal_logging import RouterLogger
+from utils import calculate_text_metrics, load_dataset_samples
+from hc_models.utils import load_hc_estimator
+from hc_models.patching import patch_model_with_hc
 
 def load_config_from_file(config_path: str) -> Dict:
     CONFIG_FILE = os.path.join(Path(__file__).parent, "configs", config_path)
@@ -173,7 +173,7 @@ def main():
     config = load_config_from_file(args.config)
     dirs = setup_directories(config)
 
-    from pipelines.hc_models.patching import set_hc_estimator
+    from hc_models.patching import set_hc_estimator
     model, tokenizer = load_model(config)
 
     results = {}
