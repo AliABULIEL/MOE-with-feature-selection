@@ -124,6 +124,28 @@ def load_dataset_samples(dataset_name: str, max_samples: int) -> List[Dict]:
                 samples.append({"text": text})
                 if len(samples) >= max_samples:
                     break
+    elif dataset_name in ["race", "ehovy/race"]:
+        try:
+            dataset = load_dataset("ehovy/race", name="all", split="test", streaming=True)
+        except Exception:
+            try:
+                dataset = load_dataset("ehovy/race", name="all", split="validation", streaming=True)
+            except Exception:
+                try:
+                    dataset = load_dataset("ehovy/race", name="high", split="test", streaming=True)
+                except Exception:
+                    dataset = load_dataset("ehovy/race", name="all", split="train", streaming=True)
+
+        samples = []
+        seen_ids = set()
+        for item in dataset:
+            ex_id = item.get("example_id")
+            article = item.get("article", "")
+            if ex_id not in seen_ids and article.strip():
+                seen_ids.add(ex_id)
+                samples.append({"text": article})
+                if len(samples) >= max_samples:
+                    break
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 

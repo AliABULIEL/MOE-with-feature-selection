@@ -75,7 +75,7 @@ class HCRoutingConfig(BaseModel):
 
 class EvaluationConfig(BaseModel):
     """Evaluation configuration."""
-    datasets: List[Literal["wikitext", "lambada", "hellaswag", "tinystories", "fineweb-edu"]] = Field(
+    datasets: List[Literal["wikitext", "lambada", "hellaswag", "tinystories", "fineweb-edu", "race"]] = Field(
         default=["wikitext"], description="Datasets to evaluate"
     )
     max_samples: int = Field(default=200, description="Max samples per dataset")
